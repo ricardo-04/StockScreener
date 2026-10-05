@@ -1,0 +1,17 @@
+# Entornos virtuales
+.venv/
+venv/
+ENV/
+env/
+
+# Bytecode Python e cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ficheiros temporários e locks do Office/Excel
+.~lock.*#
+~$*
+
+# Ficheiros gerados/relatórios (descomente se não quiser subir relatórios Excel)
+# *.xlsx
