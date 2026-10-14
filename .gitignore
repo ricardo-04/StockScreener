@@ -1,17 +1,30 @@
-# Entornos virtuales
+# Ambientes virtuais
 .venv/
 venv/
 ENV/
 env/
 
-# Bytecode Python e cache
+# Bytecode Python e caches de ferramentas
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+
+# Segredos
+.env
+
+# Dados em cache (yfinance, universos, respostas de IA)
+cache/
+
+# Relatórios e logs gerados
+output/
+*.xlsx
+*.log
 
 # Ficheiros temporários e locks do Office/Excel
 .~lock.*#
 ~$*
 
-# Ficheiros gerados/relatórios (descomente se não quiser subir relatórios Excel)
-# *.xlsx
+# IDEs
+.idea/
+.vscode/

@@ -1,0 +1,245 @@
+# =====================================================================
+# StockScreener — configuração central
+# ---------------------------------------------------------------------
+# Todos os limiares, pesos e opções do pipeline vivem aqui. O código não
+# contém números mágicos. Convenções:
+#   - valores monetários em USD (inteiros, sem notação científica);
+#   - rácios e percentagens em fração (0.10 = 10%);
+#   - nomes de etapas usados em --skip-stage: eligibility, financial_health,
+#     quality, growth, valuation, momentum;
+#   - em cada etapa, "default" aplica-se a todos os tipos de negócio e
+#     "by_type.<tipo>" sobrepõe-se (standard, bank_insurance, reit, utility,
+#     cyclical_commodity).
+# =====================================================================
+
+universe:
+  default: sp500              # sp500 | sp400 | sp600 | sp1500 | caminho para CSV
+  csv_ticker_column: ticker   # coluna com os tickers num CSV custom
+  cache_ttl_hours: 168        # a lista de constituintes muda raramente (7 dias)
+
+data:
+  cache_dir: cache                  # cache SQLite dos dados do yfinance
+  cache_ttl_hours: 24
+  max_workers: 8                    # threads de download (máx. recomendado ~8)
+  request_delay_seconds: 0.15       # pausa por ticker em cada worker (suaviza rate-limit)
+  retries: 3                        # novas tentativas após falha transitória
+  backoff_base_seconds: 2.0         # espera = base x 2^(tentativa-1) + jitter
+  rate_limit_backoff_seconds: 15.0  # base de espera quando o Yahoo devolve rate-limit
+  price_history_period: 2y          # histórico diário de preços
+  statement_years: 4                # anos fiscais guardados por demonstração
+  fetch_estimates: true             # estimativas de receita dos analistas (yfinance)
+
+logging:
+  dir: output/logs
+  level: INFO                       # nível da consola; o ficheiro guarda sempre DEBUG
+
+output:
+  dir: output
+  excel_prefix: screener            # output/screener_YYYY-MM-DD.xlsx
+  markdown_prefix: relatorio        # output/relatorio_YYYY-MM-DD.md
+
+# ---------------------------------------------------------------------
+# Classificação por tipo de negócio (sector + industry do yfinance).
+# Só bancos, seguradoras, gestoras de ativos e capital markets recebem o
+# tratamento de financeiras; Visa/Mastercard (Credit Services), bolsas e
+# fornecedores de dados (Financial Data & Stock Exchanges) e corretores de
+# seguros (Insurance Brokers) são avaliados como empresas normais.
+# ---------------------------------------------------------------------
+business_types:
+  bank_insurance:
+    industry_keywords: [bank, insurance, asset management, capital markets, financial conglomerates, mortgage finance]
+    industry_exclude: [insurance brokers]
+  reit:
+    sectors: [Real Estate]
+    industry_keywords: [reit]       # Real Estate sem "REIT" na industry (ex.: CBRE) fica standard
+  utility:
+    sectors: [Utilities]
+  cyclical_commodity:
+    sectors: [Energy, Basic Materials]
+  lender_heuristic:                 # "Credit Services" com perfil de banco (AXP, COF): sem EBIT e
+    enabled: true                   # margem financeira relevante -> bank_insurance. Visa/MA têm EBIT.
+    industries: [credit services]
+    min_net_interest_income_to_revenue: 0.15   # AXP ~24%, COF ~75%; Visa/MA não têm NII
+
+# Parâmetros de cálculo das métricas (funções puras em src/metrics)
+metrics:
+  tax_rate_floor: 0.10              # taxa efetiva limitada a [10%, 30%] no NOPAT
+  tax_rate_cap: 0.30
+  tax_rate_default: 0.21            # só quando não há imposto nem taxa reportada (estatutária EUA)
+  dollar_volume_window_days: 60
+  sma_window_days: 200
+  momentum_lookback_days: 252       # 12 meses em dias de bolsa
+  momentum_skip_days: 21            # exclui o último mês (momentum 12-1)
+  fcf_history_years: 4
+  roic_average_years: 3
+  roe_average_years: 3
+  revenue_cagr_years: 3
+  cash_conversion_years: 3          # Σ FCF / Σ lucro líquido nos últimos N anos
+  gross_margin_years: 4             # desvio padrão da margem bruta
+  dilution_years: 3                 # CAGR do nº de ações
+
+# ---------------------------------------------------------------------
+# Etapas do funil. Uma empresa é eliminada na primeira etapa em que falha,
+# ficando registadas todas as regras falhadas dessa etapa.
+# ---------------------------------------------------------------------
+stages:
+  eligibility:                      # Etapa 1 – Elegibilidade e dados
+    enabled: true
+    min_market_cap_usd: 2000000000          # 2 mil M USD
+    min_avg_dollar_volume_usd: 10000000     # 10 M USD/dia (média 60 dias)
+    min_price_usd: 5.0
+    min_statement_years: 3
+    expected_currency: USD                  # outra moeda gera aviso (limiares em USD)
+    critical_fields:                        # em falta -> "dados insuficientes: <campo>"
+      standard: [revenue, ebit, net_income, operating_cash_flow, capex, total_assets, equity, total_debt, cash]
+      cyclical_commodity: [revenue, ebit, net_income, operating_cash_flow, capex, total_assets, equity, total_debt, cash]
+      utility: [revenue, ebit, net_income, operating_cash_flow, capex, total_assets, equity, total_debt, cash]
+      reit: [revenue, net_income, operating_cash_flow, total_assets, equity, total_debt, cash]
+      bank_insurance: [revenue, net_income, equity, total_assets, price_to_book]
+
+  financial_health:                 # Etapa 2 – Saúde financeira (kill switches)
+    enabled: true
+    by_type:
+      standard:
+        max_net_debt_to_ebitda: 3.0
+        min_interest_coverage: 4.0
+        min_altman_z: 1.8
+        min_current_ratio: 1.0
+      cyclical_commodity:
+        max_net_debt_to_ebitda: 2.0
+        min_interest_coverage: 4.0
+        min_altman_z: 1.8
+        min_current_ratio: 1.0
+      utility:
+        max_net_debt_to_ebitda: 5.5
+        min_interest_coverage: 2.5
+      reit:
+        max_net_debt_to_ebitda: 7.0
+      bank_insurance:
+        roe_positive_years: 3
+        require_price_to_book: true
+    min_piotroski: 5                # todos exceto bancos
+    piotroski_min_criteria: 7       # com menos critérios avaliáveis o score é só aviso
+    max_beneish_m: -1.78            # se calculável; caso contrário só aviso
+    interest_coverage_ignore_if_nd_ebitda_below: 1.0   # sem juros reportados e dívida imaterial: só aviso
+
+  quality:                          # Etapa 3 – Qualidade do negócio
+    enabled: true
+    default:
+      min_roic_avg_3y: 0.10
+      min_roic_years: 2             # anos de ROIC necessários para a média ser aceite
+      min_fcf_positive_years: 3
+      fcf_window_years: 4
+      min_cash_conversion: 0.70     # Σ FCF / Σ lucro líquido
+      max_gross_margin_std_pp: 5.0  # desvio padrão da margem bruta em pontos percentuais
+      gross_margin_eliminates: true
+      max_share_dilution_cagr: 0.03
+    by_type:
+      cyclical_commodity:
+        gross_margin_eliminates: false   # em cíclicas a volatilidade da margem é só aviso
+      reit: {}                      # usa os defaults; afinar aqui se os REITs forem demasiado penalizados
+      bank_insurance:
+        min_roe_avg_3y: 0.10        # bancos/seguradoras: ROE médio em vez de ROIC/FCF
+
+  growth:                           # Etapa 4 – Crescimento
+    enabled: true
+    default:
+      min_revenue_cagr_3y: 0.03
+      max_consecutive_eps_declines: 1   # EPS não pode cair 2 anos seguidos
+      require_nonnegative_expected_revenue_growth: true
+    by_type:
+      cyclical_commodity:
+        min_revenue_cagr_3y: 0.0
+
+  valuation:                        # Etapa 5 – Valuation relativa ao setor
+    enabled: true
+    min_sector_size: 5              # setores mais pequenos no universo: regras relativas só como aviso
+    max_peg_warning: 2.5            # PEG > 2.5 gera aviso, não elimina
+    default:
+      min_fcf_yield_sector_pct: 40  # FCF/EV >= percentil 40 do setor
+      max_ev_ebit_sector_pct: 70    # EV/EBIT <= percentil 70 do setor
+      forward_pe_min: 0.0
+      forward_pe_max: 40.0
+    by_type:
+      bank_insurance:
+        max_pb_sector_pct: 70
+        max_forward_pe: 18.0
+      reit:
+        min_dividend_yield: 0.03    # defaults a afinar; sem dados -> só aviso
+        max_p_ffo: 25.0
+
+  momentum:                         # Etapa 6 – Momentum / timing (pode ser desligada)
+    enabled: true
+    min_momentum_12_1: -0.20
+    falling_knife_momentum: -0.10   # "faca a cair" se preço < SMA200 e momentum 12-1 < -10%
+
+# ---------------------------------------------------------------------
+# Etapa 7 – Ranking final: z-scores dentro do setor (robustos: mediana/MAD),
+# winsorizados a ±winsorize_z, agregados em 4 pilares. direction: 1 = maior é
+# melhor, -1 = menor é melhor; types/exclude_types restringem por tipo.
+# ---------------------------------------------------------------------
+scoring:
+  top_n: 20
+  winsorize_z: 3.0
+  robust_z: true
+  weights:
+    quality: 0.35
+    valuation: 0.30
+    financial_health: 0.20
+    momentum: 0.15
+  pillars:
+    quality:
+      - {metric: roic_avg_3y, direction: 1, exclude_types: [bank_insurance]}
+      - {metric: roe_avg_3y, direction: 1, types: [bank_insurance]}
+      - {metric: operating_margin, direction: 1, exclude_types: [bank_insurance]}
+      - {metric: cash_conversion, direction: 1, exclude_types: [bank_insurance]}
+      - {metric: share_dilution_cagr, direction: -1}
+    valuation:
+      - {metric: fcf_yield, direction: 1, exclude_types: [bank_insurance, reit]}
+      - {metric: ev_to_ebit, direction: -1, exclude_types: [bank_insurance, reit]}
+      - {metric: forward_pe, direction: -1}
+      - {metric: price_to_book, direction: -1, types: [bank_insurance]}
+      - {metric: dividend_yield, direction: 1, types: [reit]}
+      - {metric: p_ffo, direction: -1, types: [reit]}
+    financial_health:
+      - {metric: net_debt_to_ebitda, direction: -1, exclude_types: [bank_insurance]}
+      - {metric: interest_coverage, direction: 1, exclude_types: [bank_insurance]}
+      - {metric: altman_z, direction: 1, exclude_types: [bank_insurance, reit, utility]}
+      - {metric: piotroski_f, direction: 1, exclude_types: [bank_insurance]}
+      - {metric: equity_to_assets, direction: 1, types: [bank_insurance]}
+    momentum:
+      - {metric: momentum_12_1, direction: 1}
+      - {metric: price_vs_sma200, direction: 1}
+
+# ---------------------------------------------------------------------
+# Notícias e análise qualitativa com IA (só para o Top N). A IA nunca
+# altera a aprovação do funil; red flags marcam "REVER MANUALMENTE".
+# ---------------------------------------------------------------------
+news:
+  enabled: true                     # --no-news desliga
+  max_items: 15                     # por empresa, após remover duplicados, mais recentes primeiro
+  yfinance_count: 20                # itens pedidos ao Yahoo antes de deduplicar
+  search_fallback: true             # usa yfinance.Search quando Ticker.news vem vazio
+  use_finnhub_if_available: true    # company-news da Finnhub se existir FINNHUB_API_KEY no .env
+  finnhub_days: 30
+  cache_ttl_hours: 6
+  request_delay_seconds: 0.3
+
+ai:
+  enabled: true                     # --no-ai ou ausência de GEMINI_API_KEY (.env) desligam
+  model: gemini-3.8-flash           # modelo Flash por custo; GEMINI_MODEL no .env tem prioridade.
+                                    # Se a API devolver 404 com um modelo sugerido, o analista adota-o.
+  fallback_models:                  # usados, por ordem, quando o anterior esgota as tentativas (503) ou a quota (429)
+    - gemini-3.7-flash
+    - gemini-3.5-flash
+    - gemini-3.5-flash-lite
+    - gemini-flash-lite-latest
+  temperature: 0.2
+  max_output_tokens: 2048
+  thinking_budget: 0                # 0 desliga o "thinking" (custo/latência); null deixa o modelo decidir.
+                                    # Modelos que rejeitam o parâmetro (400) são repetidos sem ele automaticamente.
+  rate_limit_seconds: 1.0           # pausa mínima entre chamadas
+  retries: 2                        # novas tentativas em 503/ritmo, com backoff exponencial (5 s, 10 s)
+  backoff_base_seconds: 5.0
+  cache_dir: cache/ai
+  cache_ttl_hours: 720              # a chave inclui a data: a mesma empresa não é reanalisada no mesmo dia
