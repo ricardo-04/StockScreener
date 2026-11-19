@@ -79,6 +79,20 @@ class DiskCache:
             self._conn.execute("DELETE FROM entries WHERE key = ?", (key,))
             self._conn.commit()
 
+    def clear(self, prefix: str | None = None) -> int:
+        """Remove todas as entradas (ou apenas ``<prefix>:`` se indicado e != 'all'). Devolve o nº removido."""
+        normalized = None if prefix is None else str(prefix).strip()
+        with self._lock:
+            if not normalized or normalized.lower() == "all":
+                cursor = self._conn.execute("DELETE FROM entries")
+            else:
+                token = f"{normalized}:"
+                cursor = self._conn.execute(
+                    "DELETE FROM entries WHERE substr(key, 1, ?) = ?", (len(token), token)
+                )
+            self._conn.commit()
+            return int(cursor.rowcount if cursor.rowcount is not None else 0)
+
     def purge_expired(self, ttl_hours: float | None = None) -> int:
         """Remove entradas expiradas; devolve quantas foram apagadas."""
         with self._lock:
@@ -90,12 +104,25 @@ class DiskCache:
         return len(expired)
 
     # ------------------------------------------------------------------ utilidades
-    def stats(self, ttl_hours: float | None = None) -> dict[str, int]:
+    def stats(self, ttl_hours: float | None = None) -> dict[str, Any]:
         with self._lock:
-            rows = self._conn.execute("SELECT created_at FROM entries").fetchall()
-        fresh = sum(1 for (created,) in rows if not self._is_expired(datetime.fromisoformat(created), ttl_hours))
+            rows = self._conn.execute("SELECT key, created_at FROM entries").fetchall()
+        fresh = sum(1 for _, created in rows if not self._is_expired(datetime.fromisoformat(created), ttl_hours))
+        by_prefix: dict[str, int] = {}
+        for key, _ in rows:
+            prefix = key.split(":", 1)[0] if ":" in key else "other"
+            by_prefix[prefix] = by_prefix.get(prefix, 0) + 1
         size = self.path.stat().st_size if self.path.exists() else 0
-        return {"entries": len(rows), "fresh": fresh, "expired": len(rows) - fresh, "size_bytes": size}
+        total = len(rows)
+        return {
+            "path": str(self.path),
+            "size_bytes": size,
+            "total_entries": total,
+            "by_prefix": by_prefix,
+            "entries": total,
+            "fresh": fresh,
+            "expired": total - fresh,
+        }
 
     def close(self) -> None:
         with self._lock:

@@ -6,8 +6,8 @@ import pytest
 from src import universe
 from src.data.cache import DiskCache
 from src.universe import (
-    UniverseEntry, UniverseError, get_universe, load_csv_universe, normalize_ticker,
-    parse_inline_tickers, parse_wikipedia_html,
+    UniverseEntry, UniverseError, fetch_wikipedia_index, get_universe, load_csv_universe, load_universe,
+    normalize_ticker, parse_inline_tickers, parse_wikipedia_html,
 )
 
 WIKI_HTML = """
@@ -91,3 +91,24 @@ def test_get_universe_falls_back_to_stale_cache_when_offline(tmp_path, monkeypat
         assert [e.ticker for e in get_universe("sp500", cache, ttl_hours=0)] == ["MSFT"]
         with pytest.raises(UniverseError):
             get_universe("sp400", cache)
+
+
+def test_universe_cache_only_uses_expired_cache_and_blocks_network(tmp_path, monkeypatch):
+    def must_not_call(*args, **kwargs):
+        raise AssertionError("Wikipedia não pode ser chamada em --cache-only")
+
+    monkeypatch.setattr(universe.requests, "get", must_not_call)
+
+    with pytest.raises(RuntimeError, match="--cache-only"):
+        fetch_wikipedia_index("sp500", cache_only=True)
+
+    with DiskCache(tmp_path / "c.sqlite", ttl_hours=0) as cache:
+        cache.set(
+            "universe:sp500",
+            {"entries": [{"ticker": "AAPL", "name": "Apple", "gics_sector": "Tech", "gics_sub_industry": "", "source": "sp500"}]},
+        )
+        entries = load_universe("sp500", cache, ttl_hours=0, cache_only=True)
+        assert [e.ticker for e in entries] == ["AAPL"]
+
+        with pytest.raises(RuntimeError, match="--cache-only"):
+            load_universe("sp400", cache, cache_only=True)

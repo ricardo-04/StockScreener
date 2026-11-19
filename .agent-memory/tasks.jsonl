@@ -1,2 +1,4 @@
 {"ev": "open", "id": "T-0001", "title": "Security, stability, and financial rigor fixes (Points 1 & 2)", "status": "open", "base": "9ae6c91b1911c50f50b770953dd884120251cfc6", "ts": "2026-11-19T13:57:33"}
 {"ev": "status", "id": "T-0001", "status": "done", "ts": "2026-11-19T14:10:57"}
+{"ev": "open", "id": "T-0002", "title": "High-value features: --diagnose, --cache-only, --preset, CLI filters, [N#] traceability, Excel styling & token telemetry", "status": "open", "base": "ee1fbd9e0098249b5e712f27510adb741fb68774", "ts": "2026-11-19T14:12:58"}
+{"ev": "status", "id": "T-0002", "status": "done", "ts": "2026-11-19T14:19:48"}

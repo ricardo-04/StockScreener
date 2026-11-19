@@ -4,11 +4,11 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
 
-from src.funnel.base import PRE_STAGE_LABEL, PRE_STAGE_NAME, Elimination, Stage
+from src.funnel.base import PRE_STAGE_LABEL, PRE_STAGE_NAME, Elimination, Stage, format_value, row_text
 
 log = logging.getLogger(__name__)
 
@@ -123,3 +123,116 @@ class FunnelEngine:
             stage_counts=counts,
             warnings=warnings,
         )
+
+
+def diagnose_tickers(
+    df: pd.DataFrame,
+    stages: Iterable[Stage],
+    tickers: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Avalia TODAS as etapas ativas para cada ticker (sem parar na primeira falha)."""
+    ordered_stages = sorted(stages, key=lambda s: s.order)
+    for stage in ordered_stages:
+        stage.prepare(df)
+
+    has_ticker = "ticker" in df.columns
+    rows_by_ticker: dict[str, pd.Series] = {}
+    if has_ticker:
+        for _, row in df.iterrows():
+            key = row_text(row, "ticker").strip().upper()
+            if key and key not in rows_by_ticker:
+                rows_by_ticker[key] = row
+
+    if tickers is None:
+        target_tickers = list(rows_by_ticker.keys()) if has_ticker else [str(i) for i in df.index]
+    else:
+        target_tickers = []
+        seen: set[str] = set()
+        for raw in tickers:
+            norm = str(raw).strip().upper().replace(".", "-")
+            if norm and norm not in seen:
+                seen.add(norm)
+                target_tickers.append(norm)
+
+    diagnostics: list[dict[str, Any]] = []
+    for ticker in target_tickers:
+        row = rows_by_ticker.get(ticker)
+        if row is None:
+            diagnostics.append(
+                {
+                    "ticker": ticker,
+                    "company": "",
+                    "sector": "",
+                    "business_type": "",
+                    "found": False,
+                    "passed_all": False,
+                    "stages": [],
+                }
+            )
+            continue
+
+        stage_entries: list[dict[str, Any]] = []
+        for stage in ordered_stages:
+            failures = list(stage.evaluate(row))
+            notes = list(stage.warnings(row))
+            stage_entries.append(
+                {
+                    "stage": stage.name,
+                    "label": stage.label,
+                    "order": stage.order,
+                    "passed": len(failures) == 0,
+                    "failures": [
+                        {
+                            "rule": f.rule,
+                            "description": f.description,
+                            "value": f.observed,
+                            "threshold": f.threshold,
+                            "text": f.text(),
+                        }
+                        for f in failures
+                    ],
+                    "warnings": notes,
+                }
+            )
+        diagnostics.append(
+            {
+                "ticker": ticker,
+                "company": row_text(row, "company"),
+                "sector": row_text(row, "sector"),
+                "business_type": row_text(row, "business_type"),
+                "found": True,
+                "passed_all": all(entry["passed"] for entry in stage_entries),
+                "stages": stage_entries,
+            }
+        )
+    return diagnostics
+
+
+def format_diagnostics(diagnostics: list[dict[str, Any]]) -> str:
+    """Resumo legível em português do diagnóstico completo por ticker e por etapa."""
+    if not diagnostics:
+        return "(nenhum ticker para diagnosticar)"
+
+    blocks: list[str] = []
+    for entry in diagnostics:
+        ticker = entry["ticker"]
+        if not entry.get("found", True):
+            blocks.append(f"{ticker} — NÃO ENCONTRADA (sem dados/métricas disponíveis)")
+            continue
+        meta_parts = [p for p in (entry.get("company"), entry.get("sector"), entry.get("business_type")) if p]
+        meta = f" ({' | '.join(meta_parts)})" if meta_parts else ""
+        status = "APROVADA" if entry.get("passed_all") else "ELIMINADA"
+        lines = [f"{ticker}{meta} — {status}"]
+        for stage in entry.get("stages", []):
+            state = "OK" if stage["passed"] else "FALHOU"
+            lines.append(f"  [{state}] {stage['label']}")
+            for failure in stage.get("failures", []):
+                text = failure.get("text") or (
+                    f"{failure['description']}: {format_value(failure.get('value'))} "
+                    f"(limiar {format_value(failure.get('threshold'))})"
+                )
+                lines.append(f"      - {text}")
+            for warning in stage.get("warnings", []):
+                lines.append(f"      * Aviso: {warning}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)

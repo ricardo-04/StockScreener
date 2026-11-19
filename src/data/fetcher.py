@@ -319,8 +319,26 @@ def _backoff_delay(exc: BaseException, attempt: int, settings: FetchSettings) ->
     return base * (2 ** (attempt - 1)) + jitter
 
 
-def fetch_ticker(ticker: str, settings: FetchSettings) -> TickerData:
-    """Descarrega um ticker com retry e backoff exponencial. Lança ``FetchError`` se esgotar."""
+def fetch_ticker(
+    ticker: str,
+    settings: FetchSettings,
+    cache: DiskCache | None = None,
+    cache_only: bool = False,
+) -> TickerData:
+    """Descarrega um ticker com retry e backoff exponencial. Lança ``FetchError`` se esgotar.
+
+    Com ``cache_only=True`` lê apenas da cache (ignorando TTL) e nunca faz pedidos de rede.
+    """
+    if cache_only:
+        if cache is not None:
+            payload = cache.get(f"ticker:{ticker}", ignore_ttl=True)
+            if payload:
+                try:
+                    return TickerData.from_payload(payload)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("%s: entrada de cache inválida em --cache-only (%s)", ticker, _short(exc))
+        raise FetchError("sem cache local (--cache-only)")
+
     attempts = settings.retries + 1
     last_exc: BaseException | None = None
     for attempt in range(1, attempts + 1):
@@ -351,14 +369,18 @@ def fetch_many(
     cache: DiskCache | None,
     settings: FetchSettings,
     refresh: bool = False,
+    cache_only: bool = False,
 ) -> tuple[list[TickerData], list[FetchFailure]]:
     """Descarrega vários tickers em paralelo (ThreadPoolExecutor + tqdm).
 
     Devolve (dados obtidos, falhas). Entradas de cache válidas evitam pedidos ao Yahoo.
+    Com ``cache_only=True`` lê apenas da cache (ignorando TTL) e nunca faz pedidos de rede.
     """
 
     def task(ticker: str) -> TickerData:
         cache_key = f"ticker:{ticker}"
+        if cache_only:
+            return fetch_ticker(ticker, settings, cache=cache, cache_only=True)
         if cache is not None and not refresh:
             payload = cache.get(cache_key)
             if payload:
@@ -376,8 +398,8 @@ def fetch_many(
     results: dict[str, TickerData] = {}
     failures: list[FetchFailure] = []
     workers = max(1, min(settings.max_workers, len(tickers) or 1))
-    log.info("A descarregar %d tickers com %d workers (cache %s)", len(tickers), workers,
-             "ignorada" if refresh else "ativa")
+    cache_mode = "apenas cache" if cache_only else ("ignorada" if refresh else "ativa")
+    log.info("A descarregar %d tickers com %d workers (cache %s)", len(tickers), workers, cache_mode)
 
     with logging_redirect_tqdm():
         with ThreadPoolExecutor(max_workers=workers) as executor:

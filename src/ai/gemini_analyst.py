@@ -310,6 +310,32 @@ def _is_model_unavailable(exc: BaseException) -> bool:
     return any(hint in message for hint in MODEL_UNAVAILABLE_HINTS)
 
 
+def _extract_usage(response: Any) -> dict[str, int | None] | None:
+    """Extrai contagens de tokens de ``response.usage_metadata`` quando disponível."""
+    meta = getattr(response, "usage_metadata", None)
+    if meta is None:
+        return None
+
+    def _int_or_none(attr: str) -> int | None:
+        val = getattr(meta, attr, None)
+        if val is None and isinstance(meta, dict):
+            val = meta.get(attr)
+        return int(val) if isinstance(val, (int, float)) and not isinstance(val, bool) else None
+
+    prompt_tokens = _int_or_none("prompt_token_count")
+    candidates_tokens = _int_or_none("candidates_token_count")
+    total_tokens = _int_or_none("total_token_count")
+    if total_tokens is None and (prompt_tokens is not None or candidates_tokens is not None):
+        total_tokens = (prompt_tokens or 0) + (candidates_tokens or 0)
+    if prompt_tokens is None and candidates_tokens is None and total_tokens is None:
+        return None
+    return {
+        "prompt_token_count": prompt_tokens,
+        "candidates_token_count": candidates_tokens,
+        "total_token_count": total_tokens,
+    }
+
+
 class GeminiAnalyst:
     """Cliente de análise com cache, rate limiting e retry. ``generate`` é injetável para testes."""
 
@@ -337,6 +363,21 @@ class GeminiAnalyst:
         self._client: Any = None
         self._last_call = 0.0
         self._model_switched = False
+        self.total_prompt_tokens = 0
+        self.total_candidates_tokens = 0
+        self.total_tokens = 0
+        self._last_usage: dict[str, int | None] | None = None
+
+    def _record_usage(self, usage: dict[str, int | None] | None) -> None:
+        self._last_usage = usage
+        if not usage:
+            return
+        if usage.get("prompt_token_count") is not None:
+            self.total_prompt_tokens += int(usage["prompt_token_count"])
+        if usage.get("candidates_token_count") is not None:
+            self.total_candidates_tokens += int(usage["candidates_token_count"])
+        if usage.get("total_token_count") is not None:
+            self.total_tokens += int(usage["total_token_count"])
 
     # ------------------------------------------------------------------ estado
     @property
@@ -362,6 +403,7 @@ class GeminiAnalyst:
         response = self._client.models.generate_content(
             model=self.model, contents=prompt, config=types.GenerateContentConfig(**config_kwargs)
         )
+        self._record_usage(_extract_usage(response))
         text = getattr(response, "text", None)
         if not text:
             raise ValueError("resposta vazia do modelo (possível bloqueio de segurança ou truncatura)")
@@ -452,6 +494,7 @@ class GeminiAnalyst:
                     return AiResult.from_payload(payload)
 
         prompt = build_prompt(company, explanation, news)
+        self._last_usage = None
         try:
             text = self._call_with_fallback(SYSTEM_INSTRUCTION, prompt)
             analysis = parse_analysis(text)
@@ -460,6 +503,7 @@ class GeminiAnalyst:
             log.error("%s: análise com IA falhou (%s)", ticker, message)
             return AiResult(ticker=ticker, model=self.model, analysis=None, error=message)
 
+        analysis["tokens_used"] = self._last_usage.get("total_token_count") if self._last_usage else None
         result = AiResult(ticker=ticker, model=self.model, analysis=analysis, review_required=bool(analysis["red_flags"]))
         if self.cache is not None:  # guardado sob o modelo efetivamente usado
             self.cache.set(f"ai:{self.model}:{ticker}:{date.today().isoformat()}", result.to_payload())
@@ -477,4 +521,9 @@ class GeminiAnalyst:
             status = "cache" if result.from_cache else ("ok" if result.ok else "erro")
             log.info("IA %d/%d %s: %s%s", index, len(companies), result.ticker, status,
                      f" | {REVIEW_FLAG}" if result.review_required else "")
+        if companies:
+            log.info(
+                "IA tokens (sessão): total=%d (prompt=%d, resposta=%d)",
+                self.total_tokens, self.total_prompt_tokens, self.total_candidates_tokens,
+            )
         return results

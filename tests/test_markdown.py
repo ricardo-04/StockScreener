@@ -83,9 +83,22 @@ def test_render_report_full(tmp_path):
     assert f"- **Sentimento:** negativo (-0.70) — **{REVIEW_FLAG}**" in text
     assert "- **Red flags:** Investigação regulatória [N1]" in text
     assert "#### Notícias recentes (2)" in text
-    assert "- 2026-10-10 · Reuters · [Deal (big)](https://x/1)" in text
-    assert "- s/ data · Sem link" in text
+    assert "- [N1] 2026-10-10 · Reuters · [Deal (big)](https://x/1)" in text
+    assert "- [N2] s/ data · Sem link" in text
     assert f"**{REVIEW_FLAG}** (red flags identificadas pela IA nas notícias): BK" in text
+    # Executive red-flag banner appears right after funnel summary (before Top table)
+    banner_pos = text.index(f"> **{REVIEW_FLAG}**")
+    funnel_pos = text.index("## Resumo do funil")
+    top_pos = text.index("## Top 2")
+    assert funnel_pos < banner_pos < top_pos
+    assert "> - **BK**: Investigação regulatória [N1]" in text
+    # BK has market_cap=NaN, yet Indústria and Preço still render
+    bk_section = text.split("### 2. BK — Banco")[1]
+    assert "**Indústria:** Banks" in bk_section
+    assert "**Preço:** 50.0" in bk_section
+    assert "**Market cap:**" not in bk_section
+    # Displayed Top N count in funnel summary uses actual len(top_df) (2), not cfg top_n (20)
+    assert "Top 2" in text.split("## Top 2")[0]
 
     path = export_markdown_report(tmp_path / "rel" / "relatorio.md", result=result, top_df=top, cfg=cfg,
                                   universe_label="sp500", news_by_ticker=news, ai_results=ai)

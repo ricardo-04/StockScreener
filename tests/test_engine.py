@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from src.funnel import base
-from src.funnel.engine import FunnelEngine
+from src.funnel.engine import FunnelEngine, diagnose_tickers, format_diagnostics
 from src.funnel.stages import Elimination, RuleFailure, Stage, build_stages, check_max, check_min, format_value
 
 
@@ -137,3 +137,33 @@ def test_build_stages_respects_skip_enabled_and_registry(base_config, monkeypatc
 
     cfg = {**base_config, "stages": {**base_config["stages"], "financial_health": {"enabled": False}}}
     assert [s.name for s in build_stages(cfg)] == ["eligibility"]
+
+
+def test_diagnose_tickers_evaluates_all_stages_without_short_circuit(frame):
+    # B falha na etapa 1 (market_cap e price) mas passa na etapa 2; C passa na 1 e falha na 2;
+    # E passa em ambas com aviso na etapa 2; Z não existe.
+    stages = [LeverageStage(), MarketCapStage({"min_market_cap_usd": 2e9, "min_price_usd": 5.0})]
+    diags = diagnose_tickers(frame, stages, tickers=["b", "E", "Z"])
+    assert [d["ticker"] for d in diags] == ["B", "E", "Z"]
+
+    b_diag = diags[0]
+    assert b_diag["found"] is True and b_diag["passed_all"] is False
+    assert [s["stage"] for s in b_diag["stages"]] == ["eligibility", "financial_health"]
+    assert b_diag["stages"][0]["passed"] is False and len(b_diag["stages"][0]["failures"]) == 2
+    assert b_diag["stages"][1]["passed"] is True  # não parou na etapa 1
+
+    e_diag = diags[1]
+    assert e_diag["passed_all"] is True
+    assert e_diag["stages"][1]["warnings"] == ["alavancagem acima de 2.5x"]
+
+    z_diag = diags[2]
+    assert z_diag["found"] is False and z_diag["passed_all"] is False
+
+    text = format_diagnostics(diags)
+    assert "B (Beta | standard) — ELIMINADA" in text
+    assert "[FALHOU] Etapa 1 – Elegibilidade" in text
+    assert "[OK] Etapa 2 – Saúde financeira" in text
+    assert "E (Épsilon | standard) — APROVADA" in text
+    assert "Aviso: alavancagem acima de 2.5x" in text
+    assert "Z — NÃO ENCONTRADA" in text
+    assert format_diagnostics([]) == "(nenhum ticker para diagnosticar)"

@@ -42,3 +42,31 @@ def test_corrupted_entry_is_discarded(tmp_path):
         cache._conn.commit()
         assert cache.get("bad") is None
         assert cache.stats()["entries"] == 0
+
+
+def test_stats_by_prefix_and_clear(tmp_path):
+    db_path = tmp_path / "c.sqlite"
+    with DiskCache(db_path, ttl_hours=24) as cache:
+        cache.set("ticker:AAPL", {"v": 1})
+        cache.set("ticker:MSFT", {"v": 2})
+        cache.set("universe:sp500", {"entries": []})
+        cache.set("news:AAPL", {"items": []})
+        cache.set("misc_key", {"v": 3})
+
+        info = cache.stats()
+        assert info["path"] == str(db_path)
+        assert info["size_bytes"] > 0
+        assert info["total_entries"] == 5
+        assert info["by_prefix"] == {"ticker": 2, "universe": 1, "news": 1, "other": 1}
+
+        assert cache.clear("ticker") == 2
+        assert cache.stats()["total_entries"] == 3
+        assert "ticker" not in cache.stats()["by_prefix"]
+
+        assert cache.clear("nonexistent") == 0
+        assert cache.clear("all") == 3
+        assert cache.stats()["total_entries"] == 0
+
+        cache.set("ai:AAPL", {"v": 1})
+        assert cache.clear() == 1
+        assert cache.stats()["total_entries"] == 0

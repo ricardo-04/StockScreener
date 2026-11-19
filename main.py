@@ -24,11 +24,11 @@ from dotenv import load_dotenv
 
 from src import __version__
 from src.ai.gemini_analyst import REVIEW_FLAG, AiResult, GeminiAnalyst, ai_columns
-from src.config import STAGE_NAMES, ConfigError, load_config, resolve_path
+from src.config import PRESET_NAMES, STAGE_NAMES, ConfigError, apply_preset, load_config, resolve_path
 from src.data.cache import DiskCache
 from src.data.fetcher import FetchSettings, fetch_many
 from src.explain import explain_company, explain_metric_names
-from src.funnel.engine import FunnelEngine
+from src.funnel.engine import FunnelEngine, diagnose_tickers, format_diagnostics
 from src.funnel.stages import Elimination, build_stages
 from src.logging_setup import setup_logging
 from src.metrics.builder import build_metrics_table
@@ -64,6 +64,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-ai", action="store_true", help="desliga a análise com Gemini")
     parser.add_argument("--no-news", action="store_true", help="desliga a recolha de notícias (e, por consequência, a IA)")
     parser.add_argument("--refresh-cache", action="store_true", help="ignora as caches (dados, notícias, IA) e descarrega tudo de novo")
+    parser.add_argument("--cache-only", action="store_true", help="modo offline: usa apenas dados já em cache (sem rede)")
+    parser.add_argument("--cache-stats", action="store_true", help="mostra estatísticas da cache local e termina")
+    parser.add_argument(
+        "--clear-cache", nargs="?", const="all", default=None,
+        choices=["all", "yf", "news", "ai", "universe"],
+        help="limpa entradas da cache local (all, yf, news, ai, universe) e termina",
+    )
+    parser.add_argument(
+        "--preset", choices=list(PRESET_NAMES),
+        help=f"aplica um perfil de estratégia pré-definido ({', '.join(PRESET_NAMES)})",
+    )
+    parser.add_argument(
+        "--diagnose", metavar="TICKERS",
+        help="diagnostica tickers (separados por vírgulas) em todas as etapas do funil e termina",
+    )
+    parser.add_argument(
+        "--sector", metavar="SETOR",
+        help="filtra sobreviventes por setor (case-insensitive; aceita lista separada por vírgulas)",
+    )
+    parser.add_argument(
+        "--min-score", type=float, metavar="SCORE",
+        help="filtra o ranking final para composite_score >= SCORE",
+    )
     parser.add_argument(
         "--skip-stage", action="append", default=[], metavar="ETAPA",
         help=f"ignora uma etapa do funil ({', '.join(STAGE_NAMES)}); repetível ou separado por vírgulas",
@@ -84,6 +107,68 @@ def parse_skip_stages(values: list[str]) -> list[str]:
             f"Etapa(s) desconhecida(s) em --skip-stage: {', '.join(unknown)}. Válidas: {', '.join(STAGE_NAMES)}"
         )
     return names
+
+
+def filter_by_sector(df: pd.DataFrame, sector_spec: str) -> pd.DataFrame:
+    """Filtra linhas por setor (case-insensitive, suporta lista separada por vírgulas)."""
+    wanted = {part.strip().lower() for part in sector_spec.split(",") if part.strip()}
+    if not wanted or df.empty or "sector" not in df.columns:
+        return df.copy()
+    mask = df["sector"].astype("string").fillna("").str.strip().str.lower().isin(wanted)
+    return df.loc[mask].copy()
+
+
+def filter_by_min_score(ranked: pd.DataFrame, min_score: float) -> pd.DataFrame:
+    """Filtra o ranking para empresas com ``composite_score >= min_score``."""
+    if ranked.empty or "composite_score" not in ranked.columns:
+        return ranked.copy()
+    filtered = ranked.loc[ranked["composite_score"] >= float(min_score)].reset_index(drop=True)
+    if not filtered.empty and "rank" in filtered.columns:
+        filtered["rank"] = range(1, len(filtered) + 1)
+    return filtered
+
+
+def format_cache_stats(stats: dict) -> str:
+    """Formata o resumo de estatísticas da cache SQLite para a consola."""
+    size_bytes = int(stats.get("size_bytes", 0))
+    size_str = f"{size_bytes / (1024 * 1024):.2f} MB" if size_bytes >= 1024 * 1024 else f"{size_bytes / 1024:.1f} KB"
+    lines = [
+        f"Cache: {stats.get('path', '')}",
+        f"Tamanho: {size_str} | Entradas: {int(stats.get('total_entries', 0))}",
+    ]
+    by_prefix = stats.get("by_prefix") or {}
+    if by_prefix:
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted(by_prefix.items()))
+        lines.append(f"Por prefixo: {breakdown}")
+    return "\n".join(lines)
+
+
+def _handle_cache_commands(args: argparse.Namespace, cfg: dict, cache: DiskCache) -> int | None:
+    """Executa --cache-stats / --clear-cache e devolve 0 se algum foi pedido."""
+    if not args.cache_stats and args.clear_cache is None:
+        return None
+    if args.clear_cache is not None:
+        target = args.clear_cache
+        deleted = 0
+        if target == "all":
+            deleted += cache.clear(None)
+        elif target == "yf":
+            # fetcher.py guarda entradas Yahoo Finance com prefixo "ticker:"
+            deleted += cache.clear("ticker") + cache.clear("yf")
+        elif target in ("news", "universe"):
+            deleted += cache.clear(target)
+        if target in ("all", "ai"):
+            ai_db = resolve_path(cfg.get("ai", {}).get("cache_dir", "cache/ai")) / "gemini_cache.sqlite"
+            if ai_db.exists():
+                ai_cache = DiskCache(ai_db, ttl_hours=float(cfg.get("ai", {}).get("cache_ttl_hours", 720)))
+                try:
+                    deleted += ai_cache.clear(None if target == "all" else "ai")
+                finally:
+                    ai_cache.close()
+        print(f"Cache limpa ({target}): {deleted} entrada(s) removida(s).")
+    if args.cache_stats:
+        print(format_cache_stats(cache.stats()))
+    return 0
 
 
 def format_top_table(top_df: pd.DataFrame) -> str:
@@ -144,18 +229,23 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = load_config(args.config)
+        if args.preset:
+            cfg = apply_preset(cfg, args.preset)
         skip = parse_skip_stages(args.skip_stage)
+        if args.cache_only and args.refresh_cache:
+            raise ConfigError("--cache-only e --refresh-cache não podem ser usados em simultâneo")
     except ConfigError as exc:
         print(f"ERRO de configuração: {exc}", file=sys.stderr)
         return 2
 
     log_file = setup_logging(resolve_path(cfg["logging"]["dir"]), args.log_level or cfg["logging"].get("level", "INFO"))
-    log.info("StockScreener v%s | config: %s", __version__, cfg["_config_path"])
+    log.info("StockScreener v%s | config: %s%s", __version__, cfg["_config_path"],
+             f" | preset: {args.preset}" if args.preset else "")
     log.info("Log desta execução: %s", log_file)
     started = time.time()
 
     top_n = args.top or int(cfg["scoring"]["top_n"])
-    news_enabled = bool(cfg.get("news", {}).get("enabled", True)) and not args.no_news
+    news_enabled = bool(cfg.get("news", {}).get("enabled", True)) and not args.no_news and not args.cache_only
     ai_enabled = bool(cfg.get("ai", {}).get("enabled", False)) and not args.no_ai and news_enabled
 
     data_cfg = cfg["data"]
@@ -165,6 +255,10 @@ def main(argv: list[str] | None = None) -> int:
         settings.max_workers = max(1, args.max_workers)
 
     try:
+        cache_rc = _handle_cache_commands(args, cfg, cache)
+        if cache_rc is not None:
+            return cache_rc
+
         # ---- Etapa 0: universo -------------------------------------------------
         if args.tickers:
             universe_label = "inline"
@@ -177,14 +271,23 @@ def main(argv: list[str] | None = None) -> int:
                 ttl_hours=float(cfg["universe"].get("cache_ttl_hours", 168)),
                 refresh=args.refresh_cache,
                 csv_ticker_column=cfg["universe"].get("csv_ticker_column", "ticker"),
+                cache_only=args.cache_only,
             )
         if args.limit:
             universe = universe[: args.limit]
         tickers = [entry.ticker for entry in universe]
+        diagnose_list: list[str] = []
+        if args.diagnose:
+            diagnose_list = [entry.ticker for entry in parse_inline_tickers(args.diagnose)]
+            for ticker in diagnose_list:
+                if ticker not in tickers:
+                    tickers.append(ticker)
         log.info("Universo '%s': %d tickers", universe_label, len(tickers))
 
         # ---- Download com cache, retry e progresso ---------------------------
-        datas, fetch_failures = fetch_many(tickers, cache, settings, refresh=args.refresh_cache)
+        datas, fetch_failures = fetch_many(
+            tickers, cache, settings, refresh=args.refresh_cache, cache_only=args.cache_only
+        )
 
         # ---- Métricas (funções puras) + estatísticas setoriais ---------------
         metrics_df, build_failures = build_metrics_table(datas, cfg)
@@ -193,15 +296,27 @@ def main(argv: list[str] | None = None) -> int:
             counts = metrics_df["business_type"].value_counts().to_dict()
             log.info("Tipos de negócio: %s", ", ".join(f"{k}={v}" for k, v in counts.items()))
 
+        stages = build_stages(cfg, skip=skip)
+        if diagnose_list:
+            diagnostics = diagnose_tickers(metrics_df, stages, tickers=diagnose_list)
+            print()
+            print("=" * 78)
+            print("DIAGNÓSTICO POR ETAPA")
+            print("=" * 78)
+            print(format_diagnostics(diagnostics))
+            return 0
+
         pre_eliminations = [Elimination.from_download_failure(f.ticker, f.reason) for f in fetch_failures]
         pre_eliminations += [Elimination.from_download_failure(t, reason, rule="metrics") for t, reason in build_failures]
 
         # ---- Funil (etapas 1-6) ------------------------------------------------
-        stages = build_stages(cfg, skip=skip)
         result = FunnelEngine(stages).run(metrics_df, pre_eliminations=pre_eliminations)
 
         # ---- Etapa 7: ranking e explicações ----------------------------------
-        ranked = rank_survivors(result.survivors, cfg)
+        survivors = filter_by_sector(result.survivors, args.sector) if args.sector else result.survivors
+        ranked = rank_survivors(survivors, cfg)
+        if args.min_score is not None:
+            ranked = filter_by_min_score(ranked, args.min_score)
         top_df = ranked.head(top_n).copy()
         top_df["explanation"] = [explain_company(row, cfg) for _, row in top_df.iterrows()]
         top_tickers = list(top_df["ticker"]) if "ticker" in top_df.columns else []

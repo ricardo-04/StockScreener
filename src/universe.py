@@ -104,7 +104,9 @@ def parse_wikipedia_html(html: str, source: str) -> list[UniverseEntry]:
     raise UniverseError(f"Nenhuma tabela com coluna de símbolos encontrada na página de {source}")
 
 
-def fetch_wikipedia_index(index_name: str, timeout: int = 30) -> list[UniverseEntry]:
+def fetch_wikipedia_index(index_name: str, timeout: int = 30, cache_only: bool = False) -> list[UniverseEntry]:
+    if cache_only:
+        raise UniverseError(f"Índice {index_name} sem cache local (--cache-only)")
     url = WIKIPEDIA_SOURCES[index_name]
     log.info("A descarregar constituintes de %s (%s)", index_name, url)
     try:
@@ -149,6 +151,7 @@ def get_universe(
     ttl_hours: float = 168.0,
     refresh: bool = False,
     csv_ticker_column: str = "ticker",
+    cache_only: bool = False,
 ) -> list[UniverseEntry]:
     """Resolve a especificação do universo: ``sp500``, ``sp400``, ``sp600``, ``sp1500`` ou um CSV."""
     key = spec.strip()
@@ -158,14 +161,14 @@ def get_universe(
         merged: list[UniverseEntry] = []
         seen: set[str] = set()
         for part in COMPOSITE_INDICES[lowered]:
-            for entry in get_universe(part, cache, ttl_hours, refresh, csv_ticker_column):
+            for entry in get_universe(part, cache, ttl_hours, refresh, csv_ticker_column, cache_only=cache_only):
                 if entry.ticker not in seen:
                     seen.add(entry.ticker)
                     merged.append(entry)
         return merged
 
     if lowered in WIKIPEDIA_SOURCES:
-        return _cached_index(lowered, cache, ttl_hours, refresh)
+        return _cached_index(lowered, cache, ttl_hours, refresh, cache_only=cache_only)
 
     path = Path(key)
     if path.suffix.lower() in (".csv", ".txt"):
@@ -176,8 +179,26 @@ def get_universe(
     )
 
 
-def _cached_index(index_name: str, cache: DiskCache | None, ttl_hours: float, refresh: bool) -> list[UniverseEntry]:
+load_universe = get_universe
+
+
+def _cached_index(
+    index_name: str,
+    cache: DiskCache | None,
+    ttl_hours: float,
+    refresh: bool,
+    cache_only: bool = False,
+) -> list[UniverseEntry]:
     cache_key = f"universe:{index_name}"
+    if cache_only:
+        if cache is not None:
+            payload = cache.get(cache_key, ignore_ttl=True)
+            if payload and payload.get("entries"):
+                entries = [UniverseEntry(**item) for item in payload["entries"]]
+                log.info("%s: %d tickers (cache offline)", index_name, len(entries))
+                return entries
+        raise UniverseError(f"Índice {index_name} sem cache local (--cache-only)")
+
     if cache is not None and not refresh:
         payload = cache.get(cache_key, ttl_hours=ttl_hours)
         if payload and payload.get("entries"):

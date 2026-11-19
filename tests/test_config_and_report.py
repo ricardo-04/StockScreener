@@ -52,6 +52,10 @@ def test_number_formats_by_column_name():
     assert number_format_for("market_cap") == '$#,##0,,"M"'
     assert number_format_for("free_cash_flow_fy2") == '$#,##0,,"M"'
     assert number_format_for("avg_dollar_volume_60d") == '$#,##0,,"M"'
+    assert number_format_for("altman_z") == "0.00"
+    assert number_format_for("beneish_m") == "0.00"
+    assert number_format_for("cash_conversion") == '0.00"x"'
+    assert number_format_for("altman_z_sector_pct") == "0.0"
     assert number_format_for("ticker") is None
 
 
@@ -110,14 +114,29 @@ def test_export_workbook_has_three_sheets(tmp_path):
     ai = {"A": AiResult(ticker="A", model="m", analysis={"sentiment": "neutro", "sentiment_score": 0.0, "catalysts": [],
                                                          "risks": ["r"], "red_flags": ["flag"], "moat_assessment": "m",
                                                          "thesis_summary": "t", "news_impact": "i"}, review_required=True)}
+    top["ai_sentiment"] = ["negativo", "positivo"]
+    top["ai_sentiment_score"] = [-0.6, 0.5]
+    top["ai_review"] = ["REVER MANUALMENTE", ""]
     path = export_screener_workbook(result, metrics, tmp_path / "out" / "screener2.xlsx", top_df=top, news_by_ticker=news, ai_results=ai)
     wb = openpyxl.load_workbook(path)
     assert wb.sheetnames == ["Resumo_Funil", "Top_N", "Noticias_IA", "Eliminadas", "Universo_Completo"]
     ws = wb["Noticias_IA"]
     rows = list(ws.iter_rows(min_row=2, values_only=True))
     assert rows[0][2] == "ANÁLISE IA" and "REVER MANUALMENTE" in rows[0][5]
-    assert rows[1][2] == "NOTÍCIA" and rows[1][5] == "Título" and rows[1][3] == "2026-10-01"
+    assert rows[1][2] == "NOTÍCIA" and rows[1][5] == "[N1] Título" and rows[1][3] == "2026-10-01"
+    # Clickable hyperlink on safe https URL
+    link_cell = ws.cell(row=3, column=8)
+    assert link_cell.hyperlink is not None and link_cell.hyperlink.target == "https://x"
+    assert link_cell.font.underline == "single"
+    # Soft red fill on REVER MANUALMENTE row in Noticias_IA
+    assert ws.cell(row=2, column=1).fill.start_color.rgb.endswith("FCE4D6")
     top_ws = wb["Top_N"]
+    # Highlighting in Top_N for REVER MANUALMENTE and negative sentiment
+    top_headers = [c.value for c in top_ws[1]]
+    sent_col = top_headers.index("ai_sentiment") + 1
+    rev_col = top_headers.index("ai_review") + 1
+    assert top_ws.cell(row=2, column=rev_col).fill.start_color.rgb.endswith("FCE4D6")
+    assert top_ws.cell(row=2, column=sent_col).font.color.rgb.endswith("9C0006")
     assert [c.value for c in top_ws[1]][:3] == ["rank", "ticker", "company"]
     assert top_ws["A2"].value == 1 and top_ws["A2"].number_format == "#,##0"
     universe_ws = wb["Universo_Completo"]

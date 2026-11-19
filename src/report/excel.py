@@ -30,6 +30,10 @@ HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="s
 HEADER_FONT = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 SUBHEADER_FONT = Font(name="Calibri", size=11, bold=True, color="1F4E79")
 DATA_FONT = Font(name="Calibri", size=10)
+LINK_FONT = Font(name="Calibri", size=10, color="0563C1", underline="single")
+REVIEW_FILL = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+REVIEW_FONT = Font(name="Calibri", size=10, bold=True, color="9C0006")
+NEGATIVE_FONT = Font(name="Calibri", size=10, bold=True, color="9C0006")
 THIN = Side(border_style="thin", color="E0E0E0")
 CELL_BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 MIN_COLUMN_WIDTH = 12
@@ -40,7 +44,7 @@ WIDTH_SAMPLE_ROWS = 500
 # Formatos numéricos por palavra-chave do nome da coluna. A ordem de verificação importa.
 PERCENTILE_KEYWORDS = ("_pct", "score", "_z")
 PERCENT_KEYWORDS = ("margin", "yield", "roic", "roe", "momentum", "growth", "tax_rate",
-                    "price_vs_sma", "cagr", "dilution", "conversion", "equity_to_assets")
+                    "price_vs_sma", "cagr", "dilution", "equity_to_assets")
 RATIO_KEYWORDS = ("_pe", "peg", "ratio", "coverage", "to_ebitda", "to_book", "eps", "altman",
                   "beneish", "ev_to_ebit", "p_ffo")
 COUNT_KEYWORDS = ("years", "shares", "days", "piotroski", "count", "stage_order", "entraram",
@@ -76,6 +80,10 @@ def number_format_for(header: str) -> str | None:
     name = header.lower()
     if "sentiment_score" in name:
         return "0.00"
+    if name in ("altman_z", "beneish_m"):
+        return "0.00"
+    if name == "cash_conversion":
+        return '0.00"x"'
     if any(k in name for k in PERCENTILE_KEYWORDS):
         return "0.0"
     if any(k in name for k in PERCENT_KEYWORDS):
@@ -121,12 +129,48 @@ def excel_value(value: Any) -> Any:
     return str(value)
 
 
+def _is_safe_http_url(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower().startswith(("http://", "https://"))
+
+
+def highlight_ai_signals(ws: Worksheet, header_row: int = 1) -> None:
+    """Destaca linhas com REVER MANUALMENTE (fundo vermelho suave) e sentimento negativo (texto vermelho)."""
+    headers = [str(cell.value or "").lower() for cell in ws[header_row]]
+    col_idx = {name: i for i, name in enumerate(headers)}
+    review_col = col_idx.get("ai_review")
+    sentiment_col = col_idx.get("ai_sentiment")
+    score_col = col_idx.get("ai_sentiment_score")
+    kind_col = col_idx.get("kind")
+    title_col = col_idx.get("title")
+
+    for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row):
+        is_review = False
+        if review_col is not None and str(row[review_col].value or "").strip() == "REVER MANUALMENTE":
+            is_review = True
+            row[review_col].font = REVIEW_FONT
+        if kind_col is not None and title_col is not None and str(row[kind_col].value or "").strip() == "ANÁLISE IA":
+            title_text = str(row[title_col].value or "")
+            if "REVER MANUALMENTE" in title_text:
+                is_review = True
+                row[title_col].font = REVIEW_FONT
+            elif title_text.lower().startswith("sentimento: negativo"):
+                row[title_col].font = NEGATIVE_FONT
+        if is_review:
+            for cell in row:
+                cell.fill = REVIEW_FILL
+        if sentiment_col is not None and str(row[sentiment_col].value or "").strip().lower() == "negativo":
+            row[sentiment_col].font = NEGATIVE_FONT
+            if score_col is not None:
+                row[score_col].font = NEGATIVE_FONT
+
+
 def format_worksheet(ws: Worksheet, header_row: int = 1) -> None:
     """Cabeçalho azul, bordas finas, formatos numéricos por coluna e larguras ajustadas."""
     headers = [str(cell.value or "") for cell in ws[header_row]]
     formats = [number_format_for(h) for h in headers]
     centered = [any(k in h.lower() for k in CENTERED_TEXT_KEYWORDS) for h in headers]
     wrapped = [any(k in h.lower() for k in WRAP_TEXT_KEYWORDS) for h in headers]
+    is_link = [h.lower() == "link" for h in headers]
 
     for cell in ws[header_row]:
         cell.fill = HEADER_FILL
@@ -148,6 +192,9 @@ def format_worksheet(ws: Worksheet, header_row: int = 1) -> None:
                 horizontal = "center" if idx < len(centered) and centered[idx] else "left"
                 wrap = idx < len(wrapped) and wrapped[idx]
                 cell.alignment = Alignment(horizontal=horizontal, vertical="top" if wrap else "center", wrap_text=wrap)
+                if idx < len(is_link) and is_link[idx] and _is_safe_http_url(value):
+                    cell.hyperlink = value.strip()
+                    cell.font = LINK_FONT
 
     for col_idx, header in enumerate(headers, start=1):
         letter = get_column_letter(col_idx)
@@ -236,9 +283,9 @@ def news_sheet_frame(top_df: pd.DataFrame, news_by_ticker: dict[str, list] | Non
                 title, summary = "Análise IA falhou", str(result.error or "")
             rows.append({"ticker": ticker, "company": company, "kind": "ANÁLISE IA", "date": result.analyzed_at[:10],
                          "source": result.model, "title": title, "summary": summary, "link": ""})
-        for item in (news_by_ticker or {}).get(ticker, []):
+        for idx, item in enumerate((news_by_ticker or {}).get(ticker, []), start=1):
             rows.append({"ticker": ticker, "company": company, "kind": "NOTÍCIA", "date": item.published_text,
-                         "source": item.source, "title": item.title, "summary": item.summary, "link": item.link})
+                         "source": item.source, "title": f"[N{idx}] {item.title}", "summary": item.summary, "link": item.link})
     return pd.DataFrame(rows, columns=list(NEWS_SHEET_COLUMNS))
 
 
@@ -270,9 +317,13 @@ def export_screener_workbook(
 
     write_funnel_summary(wb.create_sheet("Resumo_Funil"), result)
     if top_df is not None:
-        write_dataframe(wb.create_sheet("Top_N"), top_sheet_frame(top_df))
+        top_ws = wb.create_sheet("Top_N")
+        write_dataframe(top_ws, top_sheet_frame(top_df))
+        highlight_ai_signals(top_ws)
         if news_by_ticker or ai_results:
-            write_dataframe(wb.create_sheet("Noticias_IA"), news_sheet_frame(top_df, news_by_ticker, ai_results))
+            news_ws = wb.create_sheet("Noticias_IA")
+            write_dataframe(news_ws, news_sheet_frame(top_df, news_by_ticker, ai_results))
+            highlight_ai_signals(news_ws)
     write_dataframe(wb.create_sheet("Eliminadas"), result.eliminations_table())
     write_dataframe(wb.create_sheet("Universo_Completo"), metrics_df)
 

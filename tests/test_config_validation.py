@@ -5,7 +5,7 @@ import copy
 
 import pytest
 
-from src.config import ConfigError, load_config, validate_config
+from src.config import PRESETS, PRESET_NAMES, ConfigError, apply_preset, load_config, validate_config
 
 
 def test_config_error_is_value_error():
@@ -67,3 +67,18 @@ def test_validate_config_rejects_invalid_top_n(base_config, bad_top_n):
     cfg["scoring"]["top_n"] = bad_top_n
     with pytest.raises(ConfigError, match="top_n"):
         validate_config(cfg)
+
+
+@pytest.mark.parametrize("preset_name", PRESET_NAMES)
+def test_apply_preset_produces_valid_deep_copy(base_config, preset_name):
+    before = copy.deepcopy(base_config)
+    updated = apply_preset(base_config, preset_name)
+    assert base_config == before  # não muta o original
+    assert updated["_preset"] == preset_name
+    assert sum(updated["scoring"]["weights"].values()) == pytest.approx(1.0)
+    assert set(PRESETS) == {"value", "quality", "garp", "dividend"}
+
+
+def test_apply_preset_rejects_unknown_name(base_config):
+    with pytest.raises(ConfigError, match="Preset desconhecido"):
+        apply_preset(base_config, "crypto_yolo")

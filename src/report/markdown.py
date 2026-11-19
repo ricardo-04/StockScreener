@@ -156,24 +156,50 @@ def news_section(items: list) -> str:
     if not items:
         lines.append("_Sem notícias disponíveis._")
         return "\n".join(lines)
-    for item in items:
+    for idx, item in enumerate(items, start=1):
         title = item.title.replace("[", "(").replace("]", ")")
         link = f"[{title}]({item.link})" if item.link else title
         source = f" · {item.source}" if item.source else ""
-        lines.append(f"- {item.published_text}{source} · {link}")
+        lines.append(f"- [N{idx}] {item.published_text}{source} · {link}")
     return "\n".join(lines)
+
+
+def red_flag_banner(top_df: pd.DataFrame, ai_results: dict[str, Any]) -> str:
+    """Banner de alerta no topo do relatório quando alguma empresa do Top N tem red flags."""
+    tickers = [_text(t) for t in top_df["ticker"]] if not top_df.empty and "ticker" in top_df.columns else list(ai_results)
+    flagged_lines: list[str] = []
+    seen: set[str] = set()
+    for ticker in tickers:
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        result = ai_results.get(ticker)
+        if result is not None and getattr(result, "review_required", False):
+            flags = (getattr(result, "analysis", None) or {}).get("red_flags") or []
+            detail = "; ".join(str(f).strip() for f in flags if str(f).strip())
+            flagged_lines.append(f"- **{ticker}**: {detail}" if detail else f"- **{ticker}**")
+    if not flagged_lines:
+        return ""
+    header = f"> **{REVIEW_FLAG}** — {len(flagged_lines)} empresa(s) do Top N com red flags identificadas pela IA:"
+    return "\n".join([header, ">", *[f"> {line}" for line in flagged_lines]])
 
 
 def company_section(row: pd.Series, news: list, ai_result: Any, small_sector: int = 5) -> str:
     ticker = _text(row.get("ticker"))
     pillars = " · ".join(f"{label} {_score(row.get(col))}" for col, label in PILLAR_LABELS)
+    meta = [
+        f"**Setor:** {_text(row.get('sector'), 'n/d')}",
+        f"**Indústria:** {_text(row.get('industry'), 'n/d')}",
+        f"**Tipo:** {_text(row.get('business_type'), 'standard')}",
+        f"**Preço:** {format_metric(row.get('price'), 'num')}",
+    ]
+    mcap = to_float(row.get("market_cap"))
+    if not math.isnan(mcap):
+        meta.append(f"**Market cap:** {mcap / 1e9:,.1f} mil M")
     lines = [
         f"### {_score(row.get('rank'))}. {ticker} — {_text(row.get('company'), ticker)}",
         "",
-        f"**Setor:** {_text(row.get('sector'), 'n/d')} · **Indústria:** {_text(row.get('industry'), 'n/d')} · "
-        f"**Tipo:** {_text(row.get('business_type'), 'standard')} · **Preço:** {format_metric(row.get('price'), 'num')} "
-        f"· **Market cap:** {to_float(row.get('market_cap')) / 1e9:,.1f} mil M" if not math.isnan(to_float(row.get("market_cap")))
-        else f"**Setor:** {_text(row.get('sector'), 'n/d')} · **Tipo:** {_text(row.get('business_type'), 'standard')}",
+        " · ".join(meta),
         "",
         f"**Score composto:** {_score(row.get('composite_score'))} ({pillars})",
         "",
@@ -200,7 +226,7 @@ def render_markdown_report(
     generated_at: datetime | None = None,
 ) -> str:
     generated_at = generated_at or datetime.now()
-    top_n = int(cfg.get("scoring", {}).get("top_n", len(top_df)))
+    top_n = len(top_df)
     small_sector = int(((cfg.get("stages", {}).get("valuation", {}) or {}).get("min_sector_size", 5)))
     ai_results = ai_results or {}
     news_by_ticker = news_by_ticker or {}
@@ -214,9 +240,11 @@ def render_markdown_report(
         f"_Gerado em {generated_at:%Y-%m-%d %H:%M}. Dados: Yahoo Finance via yfinance._",
         "",
         funnel_section(result, top_n, universe_label),
-        "",
-        top_table_section(top_df, has_ai),
     ]
+    banner = red_flag_banner(top_df, ai_results)
+    if banner:
+        parts += ["", banner]
+    parts += ["", top_table_section(top_df, has_ai)]
     if not top_df.empty:
         parts += ["", "## Empresas do Top N"]
         for _, row in top_df.iterrows():

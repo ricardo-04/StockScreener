@@ -6,6 +6,7 @@ módulo apenas os lê, valida o mínimo indispensável e resolve caminhos relati
 """
 from __future__ import annotations
 
+import copy
 import math
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,74 @@ REQUIRED_SECTIONS = (
 # Ordem canónica das etapas do funil (também usada por --skip-stage)
 STAGE_NAMES = ("eligibility", "financial_health", "quality", "growth", "valuation", "momentum")
 PILLAR_NAMES = ("quality", "valuation", "financial_health", "momentum")
+
+# Perfis de estratégia pré-definidos (--preset)
+PRESETS: dict[str, dict[str, Any]] = {
+    "value": {
+        "scoring": {
+            "weights": {"quality": 0.25, "valuation": 0.45, "financial_health": 0.20, "momentum": 0.10},
+        },
+        "stages": {
+            "valuation": {
+                "default": {
+                    "min_fcf_yield_sector_pct": 50,
+                    "max_ev_ebit_sector_pct": 60,
+                    "forward_pe_max": 25.0,
+                },
+            },
+        },
+    },
+    "quality": {
+        "scoring": {
+            "weights": {"quality": 0.45, "valuation": 0.20, "financial_health": 0.25, "momentum": 0.10},
+        },
+        "stages": {
+            "quality": {
+                "default": {
+                    "min_roic_avg_3y": 0.15,
+                    "min_cash_conversion": 0.80,
+                },
+            },
+        },
+    },
+    "garp": {
+        "scoring": {
+            "weights": {"quality": 0.35, "valuation": 0.30, "financial_health": 0.15, "momentum": 0.20},
+        },
+        "stages": {
+            "growth": {
+                "default": {
+                    "min_revenue_cagr_3y": 0.08,
+                },
+            },
+            "valuation": {
+                "default": {
+                    "forward_pe_max": 35.0,
+                },
+            },
+        },
+    },
+    "dividend": {
+        "scoring": {
+            "weights": {"quality": 0.25, "valuation": 0.35, "financial_health": 0.35, "momentum": 0.05},
+        },
+        "stages": {
+            "financial_health": {
+                "by_type": {
+                    "standard": {
+                        "max_net_debt_to_ebitda": 2.5,
+                    },
+                },
+            },
+            "growth": {
+                "default": {
+                    "min_revenue_cagr_3y": 0.01,
+                },
+            },
+        },
+    },
+}
+PRESET_NAMES = tuple(PRESETS.keys())
 
 
 class ConfigError(ValueError):
@@ -125,6 +194,29 @@ def validate_config(cfg: dict[str, Any]) -> None:
         raise ConfigError(f"data.max_workers inválido: {raw_workers}") from exc
     if workers < 1:
         raise ConfigError("data.max_workers tem de ser >= 1")
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = copy.deepcopy(value)
+    return base
+
+
+def apply_preset(cfg: dict[str, Any], preset_name: str) -> dict[str, Any]:
+    """Devolve uma cópia profunda de ``cfg`` com o preset aplicado e revalidado."""
+    key = (preset_name or "").strip().lower()
+    if key not in PRESETS:
+        raise ConfigError(
+            f"Preset desconhecido: '{preset_name}'. Válidos: {', '.join(PRESET_NAMES)}"
+        )
+    merged = copy.deepcopy(cfg)
+    _deep_merge(merged, PRESETS[key])
+    validate_config(merged)
+    merged["_preset"] = key
+    return merged
 
 
 def resolve_path(path: str | Path) -> Path:

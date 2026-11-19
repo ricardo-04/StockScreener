@@ -152,3 +152,31 @@ def test_fetch_ticker_retries_empty_info_from_soft_rate_limit(monkeypatch):
     data = fetch_ticker("AAPL", FetchSettings(retries=3, backoff_base_seconds=0.0, fetch_estimates=False))
     assert data.ticker == "AAPL"
     assert calls["n"] == 3
+
+
+def test_fetch_many_and_fetch_ticker_cache_only_never_hits_network(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from src.data.cache import DiskCache
+
+    def must_not_call(*args, **kwargs):
+        raise AssertionError("rede não pode ser chamada em --cache-only")
+
+    monkeypatch.setattr(fetcher, "_download", must_not_call)
+
+    with DiskCache(tmp_path / "c.sqlite", ttl_hours=1) as cache:
+        expired_time = datetime.now(timezone.utc) - timedelta(hours=48)
+        cache.set("ticker:AAPL", make_ticker_data(ticker="AAPL").to_payload(), created_at=expired_time)
+
+        settings = FetchSettings(max_workers=2, request_delay_seconds=0.0)
+        # Lê entrada expirada com ignore_ttl=True sem tocar na rede
+        single = fetch_ticker("AAPL", settings, cache=cache, cache_only=True)
+        assert single.ticker == "AAPL" and single.from_cache is True
+
+        with pytest.raises(FetchError, match="--cache-only"):
+            fetch_ticker("MISS", settings, cache=cache, cache_only=True)
+
+        datas, failures = fetcher.fetch_many(["AAPL", "MISS"], cache, settings, cache_only=True)
+        assert [d.ticker for d in datas] == ["AAPL"]
+        assert len(failures) == 1
+        assert failures[0].ticker == "MISS"
+        assert "sem cache local (--cache-only)" in failures[0].reason

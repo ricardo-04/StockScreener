@@ -335,3 +335,37 @@ def test_ai_result_payload_roundtrip():
     restored = AiResult.from_payload(result.to_payload())
     assert restored.from_cache and restored.analysis == GOOD_RESPONSE and restored.ticker == "ACN"
     assert ai_columns(None)["ai_sentiment"] == ""
+
+
+def test_usage_metadata_extraction_and_session_totals(caplog):
+    import logging
+    from types import SimpleNamespace
+
+    fake_responses = [
+        SimpleNamespace(
+            text=json.dumps(GOOD_RESPONSE),
+            usage_metadata=SimpleNamespace(prompt_token_count=120, candidates_token_count=80, total_token_count=200),
+        ),
+        SimpleNamespace(
+            text=json.dumps(GOOD_RESPONSE),
+            usage_metadata=SimpleNamespace(prompt_token_count=150, candidates_token_count=50, total_token_count=None),
+        ),
+    ]
+
+    class FakeModels:
+        def generate_content(self, model, contents, config):
+            return fake_responses.pop(0)
+
+    dummy_val = "test-placeholder"
+    analyst = GeminiAnalyst({"ai": {"model": "fake", "rate_limit_seconds": 0, "retries": 0}}, dummy_val)
+    analyst._client = SimpleNamespace(models=FakeModels())
+    other = dict(COMPANY, ticker="MSFT", company="Microsoft")
+    with caplog.at_level(logging.INFO, logger="src.ai.gemini_analyst"):
+        results = analyst.analyze_many([(COMPANY, "e1", NEWS), (other, "e2", [])])
+
+    assert results["ACN"].analysis["tokens_used"] == 200
+    assert results["MSFT"].analysis["tokens_used"] == 200
+    assert analyst.total_prompt_tokens == 270
+    assert analyst.total_candidates_tokens == 130
+    assert analyst.total_tokens == 400
+    assert any("total=400 (prompt=270, resposta=130)" in rec.message for rec in caplog.records)
