@@ -287,7 +287,7 @@ def _download(ticker: str, settings: FetchSettings) -> TickerData:
     ticker_obj = yf.Ticker(ticker)
     info = ticker_obj.info
     if not isinstance(info, dict) or len(info) < MIN_INFO_KEYS:
-        raise PermanentFetchError("info vazio: ticker inválido ou sem dados no Yahoo Finance")
+        raise FetchError("info vazio ou incompleto no Yahoo Finance (possível rate-limit transitório)")
     quote_type = info.get("quoteType")
     if quote_type and quote_type not in SUPPORTED_QUOTE_TYPES:
         raise PermanentFetchError(f"tipo de instrumento não suportado: {quote_type}")

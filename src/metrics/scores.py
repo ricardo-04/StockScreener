@@ -11,6 +11,7 @@ import math
 
 import pandas as pd
 
+from src.metrics.growth import _extract_year
 from src.metrics.statements import NAN, to_float
 
 PIOTROSKI_CRITERIA = (
@@ -39,16 +40,34 @@ def _get(frame: pd.DataFrame | None, column: str, position: int) -> float:
     return to_float(frame[column].iloc[position])
 
 
-def _first(frame: pd.DataFrame | None, columns: tuple[str, ...], position: int) -> float:
+def _pair_first(frame: pd.DataFrame | None, columns: tuple[str, ...]) -> tuple[float, float, str | None]:
+    """Devolve (fy0, fy1, coluna) da primeira rubrica com valores válidos em ambos os anos."""
     for column in columns:
-        value = _get(frame, column, position)
-        if not math.isnan(value):
-            return value
-    return NAN
+        v0, v1 = _get(frame, column, 0), _get(frame, column, 1)
+        if not math.isnan(v0) and not math.isnan(v1):
+            return v0, v1, column
+    return NAN, NAN, None
+
+
+def _has_consecutive_prior_year(frame: pd.DataFrame | None) -> bool:
+    """True se a linha 0 e a linha 1 existirem e representarem anos fiscais consecutivos."""
+    if frame is None or len(frame) < 2:
+        return False
+    y0, y1 = _extract_year(frame.index[0]), _extract_year(frame.index[1])
+    if y0 is not None and y1 is not None:
+        return (y0 - y1) == 1
+    return True
 
 
 def _ratio(numerator: float, denominator: float) -> float:
-    if math.isnan(numerator) or math.isnan(denominator) or denominator == 0:
+    """Rácio com guarda contra NaN, infinitos e denominadores não positivos."""
+    if (
+        math.isnan(numerator)
+        or math.isnan(denominator)
+        or not math.isfinite(numerator)
+        or not math.isfinite(denominator)
+        or denominator <= 0
+    ):
         return NAN
     return numerator / denominator
 
@@ -64,18 +83,31 @@ def piotroski_f_score(frame: pd.DataFrame | None) -> tuple[float, int]:
     """(pontuação 0-9, nº de critérios avaliáveis). Pontuação NaN se nenhum critério for avaliável.
 
     A pontuação conta apenas os critérios avaliáveis; quem a usa deve verificar o
-    segundo valor antes de a comparar com o limiar.
+    segundo valor antes de a comparar com o limiar. Os 6 critérios de variação YoY
+    só são avaliados quando FY0 e FY1 são anos fiscais consecutivos.
     """
-    ni0, ni1 = _get(frame, "net_income", 0), _get(frame, "net_income", 1)
-    ta0, ta1 = _get(frame, "total_assets", 0), _get(frame, "total_assets", 1)
+    has_prev = _has_consecutive_prior_year(frame)
+
+    ni0 = _get(frame, "net_income", 0)
+    ta0 = _get(frame, "total_assets", 0)
     ocf0 = _get(frame, "operating_cash_flow", 0)
-    ltd0 = _first(frame, ("long_term_debt", "total_debt"), 0)
-    ltd1 = _first(frame, ("long_term_debt", "total_debt"), 1)
-    ca0, ca1 = _get(frame, "current_assets", 0), _get(frame, "current_assets", 1)
-    cl0, cl1 = _get(frame, "current_liabilities", 0), _get(frame, "current_liabilities", 1)
-    sh0, sh1 = _get(frame, "shares", 0), _get(frame, "shares", 1)
-    gp0, gp1 = _get(frame, "gross_profit", 0), _get(frame, "gross_profit", 1)
-    rev0, rev1 = _get(frame, "revenue", 0), _get(frame, "revenue", 1)
+    ca0 = _get(frame, "current_assets", 0)
+    cl0 = _get(frame, "current_liabilities", 0)
+    sh0 = _get(frame, "shares", 0)
+    gp0 = _get(frame, "gross_profit", 0)
+    rev0 = _get(frame, "revenue", 0)
+
+    if has_prev:
+        ni1 = _get(frame, "net_income", 1)
+        ta1 = _get(frame, "total_assets", 1)
+        ltd0, ltd1, _ = _pair_first(frame, ("long_term_debt", "total_debt"))
+        ca1 = _get(frame, "current_assets", 1)
+        cl1 = _get(frame, "current_liabilities", 1)
+        sh1 = _get(frame, "shares", 1)
+        gp1 = _get(frame, "gross_profit", 1)
+        rev1 = _get(frame, "revenue", 1)
+    else:
+        ni1 = ta1 = ltd0 = ltd1 = ca1 = cl1 = sh1 = gp1 = rev1 = NAN
 
     roa0, roa1 = _ratio(ni0, ta0), _ratio(ni1, ta1)
     lev0, lev1 = _ratio(ltd0, ta0), _ratio(ltd1, ta1)
@@ -118,6 +150,17 @@ def altman_z_score(working_capital: float, retained_earnings: float, ebit: float
 # ---------------------------------------------------------------------------
 def beneish_components(frame: pd.DataFrame | None) -> dict[str, float]:
     """Os 8 índices de Beneish (NaN individualmente quando não calculáveis)."""
+    ta0 = _get(frame, "total_assets", 0)
+    ni0 = _get(frame, "net_income", 0)
+    ocf0 = _get(frame, "operating_cash_flow", 0)
+    tata = _ratio(ni0 - ocf0, ta0) if not _nan(ni0, ocf0) else NAN
+
+    if not _has_consecutive_prior_year(frame):
+        return {
+            "dsri": NAN, "gmi": NAN, "aqi": NAN, "sgi": NAN,
+            "depi": NAN, "sgai": NAN, "lvgi": NAN, "tata": tata,
+        }
+
     rev0, rev1 = _get(frame, "revenue", 0), _get(frame, "revenue", 1)
     rec0, rec1 = _get(frame, "receivables", 0), _get(frame, "receivables", 1)
     cogs0, cogs1 = _get(frame, "cost_of_revenue", 0), _get(frame, "cost_of_revenue", 1)
@@ -128,28 +171,53 @@ def beneish_components(frame: pd.DataFrame | None) -> dict[str, float]:
         cogs1 = rev1 - gp1
     ca0, ca1 = _get(frame, "current_assets", 0), _get(frame, "current_assets", 1)
     ppe0, ppe1 = _get(frame, "net_ppe", 0), _get(frame, "net_ppe", 1)
-    ta0, ta1 = _get(frame, "total_assets", 0), _get(frame, "total_assets", 1)
-    dep0 = _first(frame, ("depreciation_amortization", "depreciation_amortization_cf"), 0)
-    dep1 = _first(frame, ("depreciation_amortization", "depreciation_amortization_cf"), 1)
+    ta1 = _get(frame, "total_assets", 1)
+    dep0, dep1, _ = _pair_first(frame, ("depreciation_amortization", "depreciation_amortization_cf"))
+    if not _nan(dep0, dep1):
+        dep0, dep1 = abs(dep0), abs(dep1)
     sga0, sga1 = _get(frame, "sga_expense", 0), _get(frame, "sga_expense", 1)
-    ltd0 = _first(frame, ("long_term_debt", "total_debt"), 0)
-    ltd1 = _first(frame, ("long_term_debt", "total_debt"), 1)
     cl0, cl1 = _get(frame, "current_liabilities", 0), _get(frame, "current_liabilities", 1)
-    ni0 = _get(frame, "net_income", 0)
-    ocf0 = _get(frame, "operating_cash_flow", 0)
+
+    # LVGI: (LTD + CL) / TA. Evita dupla contagem da dívida de curto prazo se cair para total_debt.
+    ltd0, ltd1 = _get(frame, "long_term_debt", 0), _get(frame, "long_term_debt", 1)
+    if not _nan(ltd0, ltd1, cl0, cl1):
+        lev_num0, lev_num1 = ltd0 + cl0, ltd1 + cl1
+    else:
+        td0, td1 = _get(frame, "total_debt", 0), _get(frame, "total_debt", 1)
+        cd0, cd1 = _get(frame, "current_debt", 0), _get(frame, "current_debt", 1)
+        tl0, tl1 = _get(frame, "total_liabilities", 0), _get(frame, "total_liabilities", 1)
+        if not _nan(td0, td1, cd0, cd1, cl0, cl1):
+            lev_num0, lev_num1 = (td0 - cd0) + cl0, (td1 - cd1) + cl1
+        elif not _nan(tl0, tl1):
+            lev_num0, lev_num1 = tl0, tl1
+        else:
+            lev_num0, lev_num1 = NAN, NAN
 
     gm0 = _ratio(rev0 - cogs0, rev0) if not _nan(rev0, cogs0) else NAN
     gm1 = _ratio(rev1 - cogs1, rev1) if not _nan(rev1, cogs1) else NAN
+    gmi = _ratio(gm1, gm0) if not math.isnan(gm1) and gm1 > 0 else NAN
+
+    if not _nan(ca0, ppe0, ca1, ppe1):
+        aq0 = 1.0 - _ratio(ca0 + ppe0, ta0)
+        aq1 = 1.0 - _ratio(ca1 + ppe1, ta1)
+        aqi = _ratio(aq0, aq1) if not _nan(aq0, aq1) and aq0 >= 0 else NAN
+    else:
+        aqi = NAN
+
+    if not _nan(dep0, dep1, ppe0, ppe1) and ppe0 >= 0 and ppe1 >= 0:
+        depi = _ratio(_ratio(dep1, dep1 + ppe1), _ratio(dep0, dep0 + ppe0))
+    else:
+        depi = NAN
 
     return {
         "dsri": _ratio(_ratio(rec0, rev0), _ratio(rec1, rev1)),
-        "gmi": _ratio(gm1, gm0),
-        "aqi": _ratio(1.0 - _ratio(ca0 + ppe0, ta0), 1.0 - _ratio(ca1 + ppe1, ta1)) if not _nan(ca0, ppe0, ca1, ppe1) else NAN,
+        "gmi": gmi,
+        "aqi": aqi,
         "sgi": _ratio(rev0, rev1),
-        "depi": _ratio(_ratio(dep1, dep1 + ppe1), _ratio(dep0, dep0 + ppe0)) if not _nan(dep0, dep1, ppe0, ppe1) else NAN,
+        "depi": depi,
         "sgai": _ratio(_ratio(sga0, rev0), _ratio(sga1, rev1)),
-        "lvgi": _ratio(_ratio(ltd0 + cl0, ta0), _ratio(ltd1 + cl1, ta1)) if not _nan(ltd0, cl0, ltd1, cl1) else NAN,
-        "tata": _ratio(ni0 - ocf0, ta0) if not _nan(ni0, ocf0) else NAN,
+        "lvgi": _ratio(_ratio(lev_num0, ta0), _ratio(lev_num1, ta1)) if not _nan(lev_num0, lev_num1) else NAN,
+        "tata": tata,
     }
 
 

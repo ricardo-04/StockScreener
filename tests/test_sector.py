@@ -58,3 +58,37 @@ def test_add_sector_stats_adds_size_pct_z_and_median(frame):
     assert math.isnan(out.loc[5, "ev_to_ebit_sector_z"])  # setor com 1 empresa
     assert len(out.columns) == len(frame.columns) + 4
     assert add_sector_stats(pd.DataFrame(), ["x"], ["y"]).empty
+
+
+def test_sector_stats_separate_business_types_within_same_sector():
+    df = pd.DataFrame(
+        {
+            "ticker": ["JPM", "BAC", "WFC", "V", "MA", "O", "PLD", "CBRE"],
+            "sector": [
+                "Financial Services", "Financial Services", "Financial Services",
+                "Financial Services", "Financial Services",
+                "Real Estate", "Real Estate", "Real Estate",
+            ],
+            "business_type": [
+                "bank_insurance", "bank_insurance", "bank_insurance",
+                "standard", "standard",
+                "reit", "reit", "standard",
+            ],
+            "price_to_book": [1.0, 2.0, 3.0, 40.0, 50.0, 2.0, 3.0, 10.0],
+        }
+    )
+    key = sector_key(df)
+    assert key.iloc[0] == "Financial Services::bank_insurance"
+    assert key.iloc[3] == "Financial Services::standard"
+    assert key.iloc[5] == "Real Estate::reit"
+    assert key.iloc[7] == "Real Estate::standard"
+
+    out = add_sector_stats(df, ["price_to_book"], ["price_to_book"], ["price_to_book"], winsor=3.0)
+    # Bancos agrupados entre si (size=3), separados de Visa/MA (size=2)
+    assert list(out["sector_size"]) == [3, 3, 3, 2, 2, 2, 2, 1]
+    assert out.loc[1, "price_to_book_sector_median"] == 2.0
+    assert out.loc[1, "price_to_book_sector_z"] == 0.0
+    assert out.loc[2, "price_to_book_sector_pct"] == 100.0  # WFC é o mais caro entre bancos, não barato face a V/MA
+    assert out.loc[3, "price_to_book_sector_median"] == 45.0
+    assert out.loc[5, "price_to_book_sector_median"] == 2.5
+    assert math.isnan(out.loc[7, "price_to_book_sector_z"])  # CBRE isolado dos REITs

@@ -59,6 +59,8 @@ def pillar_z(row: pd.Series, specs: list[dict[str, Any]]) -> tuple[float, int]:
 
 def z_to_score(z: float, winsor: float) -> float:
     """Mapeia z ∈ [−winsor, winsor] para 0-100 (50 = mediana do setor)."""
+    if winsor <= 0 or math.isnan(winsor):
+        raise ValueError(f"winsor tem de ser > 0 (recebido: {winsor})")
     value = to_float(z)
     if math.isnan(value):
         return NAN
@@ -71,11 +73,15 @@ def rank_survivors(survivors: pd.DataFrame, cfg: dict[str, Any]) -> pd.DataFrame
     weights = {k: float(v) for k, v in (scoring.get("weights") or {}).items()}
     pillars = scoring.get("pillars") or {}
     winsor = float(scoring.get("winsorize_z", 3.0))
+    total_weight = sum(weights.get(p, 0.0) for p in PILLARS if weights.get(p, 0.0) > 0)
 
     ranked = survivors.copy()
     if ranked.empty:
         for pillar in PILLARS:
+            ranked[f"pillar_{pillar}_z"] = pd.Series(dtype=float)
+            ranked[f"pillar_{pillar}_metrics"] = pd.Series(dtype=int)
             ranked[f"score_{pillar}"] = pd.Series(dtype=float)
+        ranked["composite_z"] = pd.Series(dtype=float)
         ranked["composite_score"] = pd.Series(dtype=float)
         ranked["rank"] = pd.Series(dtype=int)
         return ranked
@@ -93,7 +99,10 @@ def rank_survivors(survivors: pd.DataFrame, cfg: dict[str, Any]) -> pd.DataFrame
             if not math.isnan(z) and weight > 0:
                 weighted += weight * z
                 weight_sum += weight
-        composite.append(weighted / weight_sum if weight_sum > 0 else NAN)
+        # Pilares em falta são encolhidos para 0.0 (mediana do setor) em vez de renormalizar,
+        # evitando que empresas com 1 pilar disponível superem empresas equilibradas com 4 pilares.
+        denom = total_weight if total_weight > 0 else weight_sum
+        composite.append(weighted / denom if weight_sum > 0 and denom > 0 else NAN)
 
     for pillar in PILLARS:
         ranked[f"pillar_{pillar}_z"] = pillar_values[pillar]

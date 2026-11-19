@@ -6,6 +6,7 @@ yfinance>=0.2.60
 lxml>=5.0
 openpyxl>=3.1
 pyyaml>=6.0
+pydantic>=2.0
 tqdm>=4.66
 python-dotenv>=1.0
 

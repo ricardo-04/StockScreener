@@ -29,6 +29,12 @@ FINNHUB_URL = "https://finnhub.io/api/v1/company-news"
 ORIGIN_YFINANCE = "yfinance"
 ORIGIN_YFINANCE_SEARCH = "yfinance_search"
 ORIGIN_FINNHUB = "finnhub"
+_TOKEN_PARAM_RE = re.compile(r"([?&]token=)[^&\s\"']+", re.IGNORECASE)
+
+
+def _redact_token(text: str) -> str:
+    """Remove o valor de parâmetros ``token=`` em URLs antes de registar em log."""
+    return _TOKEN_PARAM_RE.sub(r"\1***", text)
 
 
 @dataclass
@@ -181,14 +187,14 @@ def fetch_finnhub_news(ticker: str, api_key: str, days: int = 30, timeout: int =
         "symbol": ticker,
         "from": (today - timedelta(days=days)).isoformat(),
         "to": today.isoformat(),
-        "token": api_key,
     }
+    headers = {"X-Finnhub-Token": api_key}
     try:
-        response = requests.get(FINNHUB_URL, params=params, timeout=timeout)
+        response = requests.get(FINNHUB_URL, params=params, headers=headers, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:
-        log.warning("%s: Finnhub falhou (%s: %s)", ticker, type(exc).__name__, str(exc)[:120])
+        log.warning("%s: Finnhub falhou (%s: %s)", ticker, type(exc).__name__, _redact_token(str(exc))[:120])
         return []
     if not isinstance(payload, list):
         return []

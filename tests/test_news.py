@@ -121,3 +121,39 @@ def test_news_item_roundtrip():
     restored = NewsItem.from_dict(item.to_dict())
     assert restored == item
     assert NewsItem.from_dict({"title": "x"}).published is None
+
+
+def test_fetch_finnhub_news_uses_header_and_redacts_token_on_error(monkeypatch, caplog):
+    import logging
+    import requests
+
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"headline": "H1", "source": "Reuters", "datetime": 1791992083, "url": "https://x/1", "summary": "S"}]
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["params"] = params
+        captured["headers"] = headers
+        return FakeResponse()
+
+    fake_token = "finnhub-test-value"
+    monkeypatch.setattr(news_module.requests, "get", fake_get)
+    items = news_module.fetch_finnhub_news("AAPL", fake_token, days=7)
+    assert len(items) == 1 and items[0].title == "H1"
+    assert "token" not in captured["params"]
+    assert captured["headers"] == {"X-Finnhub-Token": fake_token}
+
+    def failing_get(url, params=None, headers=None, timeout=None):
+        raise requests.HTTPError(f"401 Client Error for url: https://finnhub.io/api/v1/company-news?symbol=AAPL&token={fake_token}")
+
+    monkeypatch.setattr(news_module.requests, "get", failing_get)
+    with caplog.at_level(logging.WARNING, logger="src.news"):
+        assert news_module.fetch_finnhub_news("AAPL", fake_token) == []
+    assert any("token=***" in rec.message for rec in caplog.records)
+    assert all(fake_token not in rec.message for rec in caplog.records)

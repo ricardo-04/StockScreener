@@ -174,26 +174,57 @@ def fiscal_year_index(series: pd.Series | None) -> pd.Series | None:
     """Reindexa uma série por ano fiscal (inteiro), do mais recente ao mais antigo.
 
     Permite alinhar demonstrações cujas datas de fecho diferem por alguns dias.
+    Em calendários de 52/53 semanas (dois fechos no mesmo ano civil separados por
+    >= 180 dias, ex.: 2024-12-28 e 2024-01-01), atribui o período anterior ao ano
+    fiscal precedente em vez de o descartar; em colunas duplicadas do mesmo período,
+    nunca substitui um valor válido por NaN.
     """
     if series is None or len(series) == 0:
         return series
-    pairs: list[tuple[int, float]] = []
-    seen: set[int] = set()
+    entries: list[tuple[pd.Timestamp | None, int, float]] = []
     for label, value in series.items():
-        year = getattr(label, "year", None)
-        if year is None:
+        if isinstance(label, bool):
+            continue
+        if isinstance(label, int) or (hasattr(label, "item") and isinstance(label.item(), int)):
+            ts = None
+            year = int(label)
+        else:
             try:
-                year = pd.Timestamp(label).year
+                ts = pd.Timestamp(label)
+                if pd.isna(ts):
+                    continue
+                if ts.tzinfo is not None:
+                    ts = ts.tz_localize(None)
+                year = int(ts.year)
             except (TypeError, ValueError):
                 continue
-        if year in seen:
-            continue
-        seen.add(year)
-        pairs.append((int(year), to_float(value)))
-    if not pairs:
+        entries.append((ts, year, to_float(value)))
+    if not entries:
         return pd.Series(dtype=float)
-    pairs.sort(key=lambda item: item[0], reverse=True)
-    return pd.Series([v for _, v in pairs], index=[y for y, _ in pairs], dtype=float)
+
+    if all(ts is not None for ts, _, _ in entries):
+        entries.sort(key=lambda item: item[0], reverse=True)
+    else:
+        entries.sort(key=lambda item: item[1], reverse=True)
+
+    by_year: dict[int, tuple[pd.Timestamp | None, float]] = {}
+    for ts, year, val in entries:
+        if year not in by_year:
+            by_year[year] = (ts, val)
+            continue
+        prev_ts, prev_val = by_year[year]
+        if ts is not None and prev_ts is not None and abs((prev_ts - ts).days) >= 180:
+            # Calendário 52/53 semanas ou mudança de fecho fiscal: período distinto
+            target = year - 1
+            while target in by_year:
+                target -= 1
+            by_year[target] = (ts, val)
+        elif math.isnan(prev_val) and not math.isnan(val):
+            # Mesma janela fiscal: não perder um valor válido por causa de um NaN duplicado
+            by_year[year] = (prev_ts, val)
+
+    ordered_years = sorted(by_year.keys(), reverse=True)
+    return pd.Series([by_year[y][1] for y in ordered_years], index=ordered_years, dtype=float)
 
 
 def _has_values(series: pd.Series | None) -> bool:
@@ -330,8 +361,35 @@ def build_metrics_row(data: TickerData, cfg: dict[str, Any]) -> dict[str, Any]:
     if math.isnan(total_debt):
         total_debt = _sum_available(row["long_term_debt"], row["current_debt"])
         total_debt_source = "soma das componentes" if not math.isnan(total_debt) else None
+    prior_debt_series = _fill_missing(
+        fiscal_year_index(st.get_row_combined(data.balance, BALANCE_ROWS["total_debt_reported"])),
+        _sum_series(
+            fiscal_year_index(st.get_row_combined(data.balance, BALANCE_ROWS["long_term_debt"])),
+            fiscal_year_index(st.get_row_combined(data.balance, BALANCE_ROWS["current_debt"])),
+        ),
+    )
+    prior_positive_debt_years = (
+        int((prior_debt_series.dropna() > 0).sum())
+        if math.isnan(total_debt) and _has_values(prior_debt_series)
+        else 0
+    )
+    cf_interest_paid = abs(row["interest_paid"]) if not math.isnan(row["interest_paid"]) else NAN
+    has_material_cf_interest = (
+        not math.isnan(cf_interest_paid)
+        and cf_interest_paid > 0
+        and (
+            prior_positive_debt_years >= 1
+            or (not math.isnan(row["revenue"]) and row["revenue"] > 0 and cf_interest_paid / row["revenue"] >= 0.01)
+            or math.isnan(row["revenue"])
+            or row["revenue"] <= 0
+        )
+    )
     no_debt_rows = (
-        math.isnan(total_debt) and math.isnan(income_interest_latest) and math.isnan(income_interest_previous)
+        math.isnan(total_debt)
+        and math.isnan(income_interest_latest)
+        and math.isnan(income_interest_previous)
+        and prior_positive_debt_years < 2
+        and not has_material_cf_interest
         and row["years_balance"] > 0
     )
     if no_debt_rows:
@@ -362,12 +420,11 @@ def build_metrics_row(data: TickerData, cfg: dict[str, Any]) -> dict[str, Any]:
     series["total_assets"] = _fill_missing(
         series["total_assets"], _sum_series(series["total_liabilities"], series["total_equity_gross"], min_count=2)
     )
-    series["ebit"] = series["operating_income"] if _has_values(series["operating_income"]) else series["ebit_reported"]
-    series["shares"] = series["shares_diluted"] if _has_values(series["shares_diluted"]) else series["shares_outstanding_bs"]
-    if _has_values(series["total_debt_reported"]):
-        series["total_debt"] = series["total_debt_reported"]
-    else:
-        series["total_debt"] = _sum_series(series["long_term_debt"], series["current_debt"])
+    series["ebit"] = _fill_missing(series["operating_income"], series["ebit_reported"])
+    series["shares"] = _fill_missing(series["shares_diluted"], series["shares_outstanding_bs"])
+    series["total_debt"] = _fill_missing(
+        series["total_debt_reported"], _sum_series(series["long_term_debt"], series["current_debt"])
+    )
     if no_debt_rows and _has_values(series["equity"]):
         zeros = pd.Series(0.0, index=series["equity"].index)
         series["total_debt"] = _fill_missing(series["total_debt"], zeros)
@@ -434,21 +491,41 @@ def build_metrics_row(data: TickerData, cfg: dict[str, Any]) -> dict[str, Any]:
     row["eps_consecutive_declines"] = consecutive_declines(series["eps_diluted"])
 
     # --- scores clássicos -------------------------------------------------
+    currency_mismatch = bool(
+        row["currency"]
+        and row["financial_currency"]
+        and row["currency"].upper() != row["financial_currency"].upper()
+    )
+    if currency_mismatch:
+        notes.append(
+            f"moeda de mercado ({row['currency']}) difere da moeda das demonstrações ({row['financial_currency']}): "
+            "rácios mistos (FCF yield, EV/EBIT, P/FFO, Altman Z) omitidos"
+        )
+
     row["piotroski_f"], row["piotroski_criteria"] = piotroski_f_score(year_frame)
     working_capital = row["working_capital"]
     if math.isnan(working_capital) and not math.isnan(row["current_assets"]) and not math.isnan(row["current_liabilities"]):
         working_capital = row["current_assets"] - row["current_liabilities"]
-    row["altman_z"] = altman_z_score(
-        working_capital, row["retained_earnings"], ebit, row["total_assets"], row["market_cap"],
-        row["total_liabilities"], row["revenue"],
+    row["altman_z"] = (
+        NAN
+        if currency_mismatch
+        else altman_z_score(
+            working_capital, row["retained_earnings"], ebit, row["total_assets"], row["market_cap"],
+            row["total_liabilities"], row["revenue"],
+        )
     )
     row["beneish_m"] = beneish_m_score(year_frame)
 
     # --- valuation --------------------------------------------------------
-    row["fcf_yield"] = fcf_yield(row["free_cash_flow"], row["enterprise_value"])
-    row["ev_to_ebit"] = ev_to_ebit(row["enterprise_value"], ebit)
     row["ffo"] = funds_from_operations(row["net_income"], d_and_a)
-    row["p_ffo"] = price_to_ffo(row["market_cap"], row["ffo"])
+    if currency_mismatch:
+        row["fcf_yield"] = NAN
+        row["ev_to_ebit"] = NAN
+        row["p_ffo"] = NAN
+    else:
+        row["fcf_yield"] = fcf_yield(row["free_cash_flow"], row["enterprise_value"])
+        row["ev_to_ebit"] = ev_to_ebit(row["enterprise_value"], ebit)
+        row["p_ffo"] = price_to_ffo(row["market_cap"], row["ffo"])
 
     # --- colunas por ano --------------------------------------------------
     for key in YEAR_SERIES:

@@ -110,3 +110,22 @@ def test_consecutive_declines():
     assert consecutive_declines(s([1.00, 1.10, 1.20, 1.30])) == 3
     assert math.isnan(consecutive_declines(s([1.00, float("nan"), 1.20])))
     assert math.isnan(consecutive_declines(s([1.00])))
+
+
+def test_cagr_and_declines_respect_actual_fiscal_year_gaps():
+    gapped_rev = pd.Series([1000.0, 800.0], index=[2025, 2023], dtype=float)
+    val, span = series_cagr(gapped_rev, 3)
+    assert span == 2 and val == pytest.approx((1000.0 / 800.0) ** 0.5 - 1.0)
+
+    gapped_rev3 = pd.Series([1000.0, 800.0, 700.0], index=[2025, 2023, 2022], dtype=float)
+    val3, span3 = series_cagr(gapped_rev3, 3)
+    assert span3 == 3 and val3 == pytest.approx((1000.0 / 700.0) ** (1.0 / 3.0) - 1.0)
+
+    gapped_shares = pd.Series([110.0, 100.0], index=[2025, 2023], dtype=float)
+    sh_val, sh_span = share_count_cagr(gapped_shares, 3)
+    assert sh_span == 2 and sh_val == pytest.approx((110.0 / 100.0) ** 0.5 - 1.0)
+
+    # Gap imediato entre FY0 e FY1: não é possível avaliar queda YoY
+    assert math.isnan(consecutive_declines(pd.Series([1.0, 1.2], index=[2025, 2023], dtype=float)))
+    # Gap após 1 queda consecutiva: interrompe a sequência no gap
+    assert consecutive_declines(pd.Series([1.0, 1.1, 1.2], index=[2025, 2024, 2022], dtype=float)) == 1.0

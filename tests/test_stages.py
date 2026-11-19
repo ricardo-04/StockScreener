@@ -111,6 +111,7 @@ def test_quality_rules(base_config):
     assert stage.evaluate(series(roic_years_observed=1))[0].description.startswith("dados insuficientes: ROIC")
     assert stage.evaluate(series(fcf_positive_years=2))[0].rule == "min_fcf_positive_years"
     assert stage.evaluate(series(fcf_years_observed=2, fcf_positive_years=2))[0].description.startswith("dados insuficientes: FCF")
+    assert stage.evaluate(series(fcf_years_observed=4, fcf_positive_years=NAN))[0].description.startswith("dados insuficientes:")
     assert stage.evaluate(series(cash_conversion=0.5))[0].rule == "min_cash_conversion"
     assert stage.evaluate(series(cash_conversion=NAN))[0].rule == "min_cash_conversion"
     assert stage.evaluate(series(gross_margin_std_pp=8.0))[0].rule == "max_gross_margin_std"
@@ -146,7 +147,9 @@ def test_valuation_rules(base_config):
     assert stage.evaluate(series(ev_to_ebit_sector_pct=80.0))[0].rule == "max_ev_ebit_sector_pct"
     assert stage.evaluate(series(ev_to_ebit_sector_pct=NAN))[0].rule == "max_ev_ebit_sector_pct"
     assert stage.evaluate(series(forward_pe=45.0))[0].rule == "forward_pe_range"
-    assert stage.evaluate(series(forward_pe=-5.0))[0].rule == "forward_pe_range"
+    assert stage.evaluate(series(forward_pe=45.0))[0].threshold == 40.0
+    neg_pe = stage.evaluate(series(forward_pe=-5.0))[0]
+    assert neg_pe.rule == "forward_pe_range" and neg_pe.threshold == "> 0"
     assert stage.evaluate(series(forward_pe=NAN)) == [] and "Forward P/E" in stage.warnings(series(forward_pe=NAN))[0]
     small = series(sector_size=3, fcf_yield_sector_pct=10.0)
     assert stage.evaluate(small) == []
@@ -157,10 +160,16 @@ def test_valuation_rules(base_config):
     assert stage.evaluate(pd.Series(bank("B"))) == []
     assert stage.evaluate(pd.Series(bank("B", price_to_book_sector_pct=85.0)))[0].rule == "max_pb_sector_pct"
     assert stage.evaluate(pd.Series(bank("B", forward_pe=25.0)))[0].rule == "max_forward_pe"
+    bank_neg_pe = stage.evaluate(pd.Series(bank("B", forward_pe=-3.0)))[0]
+    assert bank_neg_pe.rule == "max_forward_pe" and bank_neg_pe.threshold == "> 0"
     reit = series(business_type="reit", dividend_yield=0.04, p_ffo=18.0)
     assert stage.evaluate(reit) == []
     assert stage.evaluate(series(business_type="reit", dividend_yield=0.02, p_ffo=18.0))[0].rule == "min_dividend_yield"
     assert stage.evaluate(series(business_type="reit", dividend_yield=0.04, p_ffo=30.0))[0].rule == "max_p_ffo"
+    neg_pffo = stage.evaluate(series(business_type="reit", dividend_yield=0.04, p_ffo=-5.0))[0]
+    assert neg_pffo.rule == "max_p_ffo" and neg_pffo.threshold == "> 0"
+    zero_pffo = stage.evaluate(series(business_type="reit", dividend_yield=0.04, p_ffo=0.0))[0]
+    assert zero_pffo.rule == "max_p_ffo" and zero_pffo.threshold == "> 0"
     reit_missing = series(business_type="reit", dividend_yield=NAN, p_ffo=NAN)
     assert stage.evaluate(reit_missing) == [] and len(stage.warnings(reit_missing)) == 2
 

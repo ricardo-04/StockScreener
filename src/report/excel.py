@@ -21,8 +21,10 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from src.funnel.engine import FunnelResult
+from src.metrics.statements import to_float
 
 log = logging.getLogger(__name__)
+FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")  # azul institucional
 HEADER_FONT = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -101,6 +103,8 @@ def excel_value(value: Any) -> Any:
         number = float(value)
         return None if math.isnan(number) or math.isinf(number) else number
     if isinstance(value, str):
+        if value and value[0] in FORMULA_PREFIXES:
+            return "'" + value
         return value
     if isinstance(value, (pd.Timestamp, datetime)):
         stamp = pd.Timestamp(value)
@@ -215,7 +219,9 @@ def news_sheet_frame(top_df: pd.DataFrame, news_by_ticker: dict[str, list] | Non
             analysis = result.analysis or {}
             if result.ok:
                 review = f" | {'REVER MANUALMENTE'}" if result.review_required else ""
-                title = f"Sentimento: {analysis.get('sentiment')} ({analysis.get('sentiment_score'):+.2f}){review}"
+                score = to_float(analysis.get("sentiment_score"))
+                score_text = "n/d" if math.isnan(score) else f"{score:+.2f}"
+                title = f"Sentimento: {analysis.get('sentiment') or 'n/d'} ({score_text}){review}"
                 summary = "\n".join(
                     part for part in (
                         f"Tese: {analysis.get('thesis_summary', '')}",

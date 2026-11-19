@@ -62,6 +62,28 @@ def test_excel_value_conversions():
     assert excel_value(pd.Timestamp("2025-01-01", tz="UTC")).tzinfo is None
     assert excel_value([1, "a"]) == '[1, "a"]'
     assert excel_value(True) is True
+    # Formula injection protection on strings; numeric values stay numeric
+    assert excel_value("=HYPERLINK(\"http://evil\")") == "'=HYPERLINK(\"http://evil\")"
+    assert excel_value("+15% rally") == "'+15% rally"
+    assert excel_value("-5% drop") == "'-5% drop"
+    assert excel_value("@SUM(A1:A2)") == "'@SUM(A1:A2)"
+    assert excel_value("\t=1+1") == "'\t=1+1"
+    assert excel_value(-5.25) == -5.25
+    assert excel_value(-10) == -10
+    assert excel_value("normal text") == "normal text"
+
+
+def test_news_sheet_frame_handles_none_and_nan_sentiment_score():
+    from src.ai.gemini_analyst import AiResult
+    from src.report.excel import news_sheet_frame
+
+    top = pd.DataFrame([{"ticker": "A", "company": "Alfa"}, {"ticker": "B", "company": "Beta"}])
+    ai = {
+        "A": AiResult(ticker="A", model="m", analysis={"sentiment": "neutro", "sentiment_score": None}),
+        "B": AiResult(ticker="B", model="m", analysis={"sentiment": "positivo", "sentiment_score": float("nan")}),
+    }
+    frame = news_sheet_frame(top, None, ai)
+    assert list(frame["title"]) == ["Sentimento: neutro (n/d)", "Sentimento: positivo (n/d)"]
 
 
 def test_export_workbook_has_three_sheets(tmp_path):

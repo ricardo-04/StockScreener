@@ -36,6 +36,10 @@ def test_z_to_score_mapping():
     assert z_to_score(3.0, 3.0) == 100.0
     assert z_to_score(-4.0, 3.0) == 0.0
     assert math.isnan(z_to_score(NAN, 3.0))
+    with pytest.raises(ValueError, match="winsor"):
+        z_to_score(1.0, 0.0)
+    with pytest.raises(ValueError, match="winsor"):
+        z_to_score(1.0, -2.0)
 
 
 def test_rank_survivors_orders_by_composite(base_config):
@@ -73,7 +77,28 @@ def test_rank_survivors_uses_bank_metrics(base_config):
     assert ranked.loc[0, "pillar_quality_z"] == 1.5
     assert ranked.loc[0, "pillar_valuation_z"] == 1.5
     assert math.isnan(ranked.loc[0, "pillar_momentum_z"])
-    assert ranked.loc[0, "composite_z"] == pytest.approx((0.35 * 1.5 + 0.30 * 1.5 + 0.20 * 0.0) / 0.85)
+    # Pilar em falta é encolhido para 0.0 (mediana do setor), sem inflacionar os restantes
+    assert ranked.loc[0, "composite_z"] == pytest.approx(0.35 * 1.5 + 0.30 * 1.5 + 0.20 * 0.0)
+
+
+def test_rank_survivors_shrinks_missing_pillars_toward_zero(base_config):
+    frame = pd.DataFrame(
+        {
+            "ticker": ["BALANCED", "ONE_PILLAR", "ALL_NAN"],
+            "business_type": ["standard", "standard", "standard"],
+            "roic_avg_3y_sector_z": [1.5, NAN, NAN],
+            "fcf_yield_sector_z": [1.5, NAN, NAN],
+            "net_debt_to_ebitda_sector_z": [-1.5, NAN, NAN],
+            "momentum_12_1_sector_z": [1.5, 2.5, NAN],
+        }
+    )
+    ranked = rank_survivors(frame, base_config)
+    assert list(ranked["ticker"]) == ["BALANCED", "ONE_PILLAR", "ALL_NAN"]
+    assert ranked.loc[0, "composite_z"] == pytest.approx(1.5)
+    assert ranked.loc[1, "composite_z"] == pytest.approx(0.15 * 2.5)
+    assert math.isnan(ranked.loc[2, "composite_z"])
+    empty = rank_survivors(frame.iloc[0:0], base_config)
+    assert "composite_z" in empty.columns and "pillar_quality_z" in empty.columns
 
 
 # ----------------------------------------------------------------------------- explicações
@@ -134,3 +159,30 @@ def test_weakness_above_median_is_labelled_as_relative():
     })
     text = explain_company(row)
     assert "Pontos de atenção: momentum 12-1 de 8.0% (acima da mediana do setor, mas o ponto relativamente mais fraco), Altman Z de 4.0 (acima da mediana do setor, mas o ponto relativamente mais fraco)." in text
+
+
+def test_small_sector_lower_is_better_ordinal_rank():
+    # n=3: rank(pct=True)*100 -> 33.33 (melhor/menor), 66.67 (meio), 100.0 (pior/maior)
+    best_of_3 = pd.Series({"business_type": "standard", "sector_size": 3, "ev_to_ebit": 8.0, "ev_to_ebit_sector_pct": 100.0 / 3})
+    mid_of_3 = pd.Series({"business_type": "standard", "sector_size": 3, "ev_to_ebit": 12.0, "ev_to_ebit_sector_pct": 200.0 / 3})
+    worst_of_3 = pd.Series({"business_type": "standard", "sector_size": 3, "ev_to_ebit": 20.0, "ev_to_ebit_sector_pct": 100.0})
+    assert "1.º de 3 no setor" in ranked_points(best_of_3)[0]["text"]
+    assert "2.º de 3 no setor" in ranked_points(mid_of_3)[0]["text"]
+    assert "3.º de 3 no setor" in ranked_points(worst_of_3)[0]["text"]
+
+    best_of_2 = pd.Series({"business_type": "standard", "sector_size": 2, "forward_pe": 10.0, "forward_pe_sector_pct": 50.0})
+    worst_of_2 = pd.Series({"business_type": "standard", "sector_size": 2, "forward_pe": 20.0, "forward_pe_sector_pct": 100.0})
+    assert "1.º de 2 no setor" in ranked_points(best_of_2)[0]["text"]
+    assert "2.º de 2 no setor" in ranked_points(worst_of_2)[0]["text"]
+
+
+def test_explain_company_skips_net_cash_for_bank_insurance():
+    row = pd.Series({
+        "business_type": "bank_insurance", "stages_passed": 6,
+        "net_debt": -5e9, "debt_status": "sem_divida",
+        "roe_avg_3y": 0.14, "roe_avg_3y_sector_pct": 85.0,
+    })
+    text = explain_company(row)
+    assert "caixa líquida" not in text
+    assert "sem dívida" not in text
+    assert "ROE médio 3 anos de 14.0%" in text

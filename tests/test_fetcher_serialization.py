@@ -118,3 +118,37 @@ def test_fetch_many_uses_cache_and_records_failures(tmp_path, monkeypatch):
     datas, _ = fetcher.fetch_many(["AAA"], cache, settings, refresh=True)
     assert downloads == ["AAA"] and not datas[0].from_cache
     cache.close()
+
+
+def test_fetch_ticker_retries_empty_info_from_soft_rate_limit(monkeypatch):
+    calls = {"n": 0}
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+            self.income_stmt = pd.DataFrame()
+            self.balance_sheet = pd.DataFrame()
+            self.cashflow = pd.DataFrame()
+            self.revenue_estimate = pd.DataFrame()
+
+        @property
+        def info(self):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return {}  # rate-limit transitório do Yahoo: info vazio
+            return {
+                "quoteType": "EQUITY",
+                "currentPrice": 50.0,
+                "marketCap": 1_000_000_000,
+                "sector": "Technology",
+                "industry": "Software",
+            }
+
+        def history(self, **kwargs):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(fetcher.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(fetcher.time, "sleep", lambda *_: None)
+    data = fetch_ticker("AAPL", FetchSettings(retries=3, backoff_base_seconds=0.0, fetch_estimates=False))
+    assert data.ticker == "AAPL"
+    assert calls["n"] == 3

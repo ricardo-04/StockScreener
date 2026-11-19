@@ -14,15 +14,24 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 SECTOR_COLUMN = "sector"
+BUSINESS_TYPE_COLUMN = "business_type"
 UNKNOWN_SECTOR = "Desconhecido"
+DEFAULT_BUSINESS_TYPE = "standard"
 MAD_SCALE = 1.4826  # torna o MAD comparável ao desvio padrão numa normal
 
 
 def sector_key(df: pd.DataFrame) -> pd.Series:
+    """Chave de grupo setorial: ``(sector, business_type)`` se ``business_type`` existir, senão ``sector``."""
     if SECTOR_COLUMN not in df.columns:
-        return pd.Series([UNKNOWN_SECTOR] * len(df), index=df.index)
-    key = df[SECTOR_COLUMN].astype("string").fillna("").str.strip()
-    return key.where(key != "", UNKNOWN_SECTOR).astype(object)
+        sector = pd.Series([UNKNOWN_SECTOR] * len(df), index=df.index, dtype=object)
+    else:
+        key = df[SECTOR_COLUMN].astype("string").fillna("").str.strip()
+        sector = key.where(key != "", UNKNOWN_SECTOR).astype(object)
+    if BUSINESS_TYPE_COLUMN not in df.columns:
+        return sector
+    btype = df[BUSINESS_TYPE_COLUMN].astype("string").fillna("").str.strip()
+    btype = btype.where(btype != "", DEFAULT_BUSINESS_TYPE).astype(object)
+    return (sector.astype(str) + "::" + btype.astype(str)).astype(object)
 
 
 def robust_zscore(values: pd.Series, winsor: float = 3.0, robust: bool = True) -> pd.Series:

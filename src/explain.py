@@ -104,7 +104,13 @@ def ranked_points(row: pd.Series, small_sector: int = 5) -> list[dict[str, Any]]
         pct = to_float(row.get(f"{spec['metric']}_sector_pct"))
         if math.isnan(value) or math.isnan(pct):
             continue
-        effective = pct if spec["direction"] > 0 else 100.0 - pct
+        if spec["direction"] > 0:
+            effective = pct
+        elif not math.isnan(sector_size) and 0 < sector_size < small_sector:
+            # rank(pct=True)*100 produz 100/n .. 100; inverter a ordem soma 100/n para que o 1.º fique a 100
+            effective = min(100.0, max(0.0, 100.0 - pct + 100.0 / sector_size))
+        else:
+            effective = 100.0 - pct
         position = position_phrase(effective, sector_size, small_sector)
         label_value = f"{spec['label']} de {format_metric(value, spec['format'])}"
         points.append({
@@ -123,12 +129,14 @@ def explain_company(row: pd.Series, cfg: dict[str, Any] | None = None, n_strengt
     """Parágrafo com etapas passadas, 3 pontos fortes, 2 pontos de atenção e alertas do funil."""
     small_sector = int(((cfg or {}).get("stages", {}).get("valuation", {}) or {}).get("min_sector_size", 5))
     points = ranked_points(row, small_sector)
+    business_type = str(row.get("business_type") or "standard")
     strengths: list[str] = []
-    net_debt = to_float(row.get("net_debt"))
-    if str(row.get("debt_status") or "") == DEBT_FREE:
-        strengths.append("sem dívida")
-    elif is_net_cash(net_debt):
-        strengths.append("caixa líquida")
+    if business_type != BANK_INSURANCE:
+        net_debt = to_float(row.get("net_debt"))
+        if str(row.get("debt_status") or "") == DEBT_FREE:
+            strengths.append("sem dívida")
+        elif is_net_cash(net_debt):
+            strengths.append("caixa líquida")
 
     used: set[str] = set()
     for point in points:

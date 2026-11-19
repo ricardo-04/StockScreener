@@ -249,6 +249,10 @@ class QualityStage(Stage):
                     failures.append(_missing_data("min_fcf_positive_years",
                                                   f"FCF disponível em apenas {0 if _isnan(observed) else int(observed)} dos últimos {window} anos",
                                                   float(need)))
+                elif _isnan(positive):
+                    failures.append(_missing_data("min_fcf_positive_years",
+                                                  "anos de FCF positivo em falta",
+                                                  float(need)))
                 elif positive < float(need):
                     failures.append(RuleFailure("min_fcf_positive_years",
                                                 f"FCF positivo em pelo menos {int(need)} dos últimos {window} anos",
@@ -399,9 +403,13 @@ class ValuationStage(Stage):
         forward_pe = row_number(row, "forward_pe")
         if business_type == BANK_INSURANCE:
             max_pe = cfg.get("max_forward_pe")
-            if max_pe is not None and not _isnan(forward_pe) and (forward_pe <= 0 or forward_pe > float(max_pe)):
-                failures.append(RuleFailure("max_forward_pe", f"Forward P/E entre 0 e {float(max_pe):g} (financeiras)",
-                                            forward_pe, float(max_pe)))
+            if max_pe is not None and not _isnan(forward_pe):
+                if forward_pe <= 0:
+                    failures.append(RuleFailure("max_forward_pe", f"Forward P/E entre 0 e {float(max_pe):g} (financeiras)",
+                                                forward_pe, "> 0"))
+                elif forward_pe > float(max_pe):
+                    failures.append(RuleFailure("max_forward_pe", f"Forward P/E entre 0 e {float(max_pe):g} (financeiras)",
+                                                forward_pe, float(max_pe)))
         elif business_type == REIT:
             min_dy = cfg.get("min_dividend_yield")
             dividend_yield = row_number(row, "dividend_yield")
@@ -409,13 +417,22 @@ class ValuationStage(Stage):
                 failures.append(RuleFailure("min_dividend_yield", "Dividend yield mínimo (REIT)", dividend_yield, float(min_dy)))
             max_pffo = cfg.get("max_p_ffo")
             p_ffo = row_number(row, "p_ffo")
-            if max_pffo is not None and not _isnan(p_ffo) and p_ffo > float(max_pffo):
-                failures.append(RuleFailure("max_p_ffo", "P/FFO aproximado máximo (REIT)", p_ffo, float(max_pffo)))
+            if max_pffo is not None and not _isnan(p_ffo):
+                if p_ffo <= 0:
+                    failures.append(RuleFailure("max_p_ffo", "P/FFO aproximado positivo (REIT)", p_ffo, "> 0"))
+                elif p_ffo > float(max_pffo):
+                    failures.append(RuleFailure("max_p_ffo", "P/FFO aproximado máximo (REIT)", p_ffo, float(max_pffo)))
         else:
             low, high = cfg.get("forward_pe_min"), cfg.get("forward_pe_max")
-            if high is not None and not _isnan(forward_pe) and (forward_pe <= float(low or 0.0) or forward_pe > float(high)):
-                failures.append(RuleFailure("forward_pe_range", f"Forward P/E entre {float(low or 0.0):g} e {float(high):g}",
-                                            forward_pe, float(high)))
+            low_val = float(low) if low is not None else 0.0
+            if not _isnan(forward_pe):
+                if (low is not None or high is not None) and forward_pe <= low_val:
+                    desc = (f"Forward P/E entre {low_val:g} e {float(high):g}" if high is not None
+                            else f"Forward P/E mínimo (> {low_val:g})")
+                    failures.append(RuleFailure("forward_pe_range", desc, forward_pe, f"> {low_val:g}"))
+                elif high is not None and forward_pe > float(high):
+                    failures.append(RuleFailure("forward_pe_range", f"Forward P/E entre {low_val:g} e {float(high):g}",
+                                                forward_pe, float(high)))
         return failures
 
     def warnings(self, row: pd.Series) -> list[str]:

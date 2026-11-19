@@ -9,6 +9,7 @@ import math
 
 import pandas as pd
 
+from src.metrics.growth import _extract_year
 from src.metrics.profitability import clamp_tax_rate, effective_tax_rate
 from src.metrics.statements import NAN, align_series, to_float
 
@@ -132,7 +133,8 @@ def gross_margin_std_pp(gross_profit_series: pd.Series | None, revenue_series: p
 def share_count_cagr(shares_series: pd.Series | None, years: int) -> tuple[float, int]:
     """CAGR do nº de ações entre o ano mais recente e o mais antigo disponível até ``years`` atrás.
 
-    Devolve (cagr, nº de anos do intervalo). Positivo = diluição; negativo = recompras líquidas.
+    Quando o índice representa anos fiscais, usa o intervalo real em anos em vez da distância
+    posicional. Devolve (cagr, nº de anos do intervalo). Positivo = diluição; negativo = recompras líquidas.
     """
     if shares_series is None or len(shares_series) == 0:
         return NAN, 0
@@ -140,8 +142,13 @@ def share_count_cagr(shares_series: pd.Series | None, years: int) -> tuple[float
     latest = to_float(values.iloc[0])
     if math.isnan(latest) or latest <= 0:
         return NAN, 0
-    for span in range(min(years, len(values) - 1), 0, -1):
-        oldest = to_float(values.iloc[span])
+    latest_year = _extract_year(values.index[0])
+    for pos in range(len(values) - 1, 0, -1):
+        older_year = _extract_year(values.index[pos])
+        span = (latest_year - older_year) if (latest_year is not None and older_year is not None) else pos
+        if span <= 0 or span > years:
+            continue
+        oldest = to_float(values.iloc[pos])
         if not math.isnan(oldest) and oldest > 0:
             return (latest / oldest) ** (1.0 / span) - 1.0, span
     return NAN, 0
