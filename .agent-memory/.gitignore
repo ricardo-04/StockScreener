@@ -1,0 +1,13 @@
+.lock
+.*.tmp
+.gate-pass
+.repro
+evals/results/
+events.jsonl
+events.1.jsonl
+.events.lock
+.session
+.replay-backup.json
+.counterexample
+.mutants
+.stop-chain

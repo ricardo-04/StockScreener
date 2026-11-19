@@ -1,0 +1,9 @@
+{
+  "commands": [
+    "python -m pytest -q"
+  ],
+  "max_output": 3000,
+  "timeout": 900,
+  "max_changed_lines": 400,
+  "max_complexity": 10
+}
